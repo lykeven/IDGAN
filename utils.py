@@ -1,254 +1,229 @@
-"""
-Some codes from https://github.com/Newmu/dcgan_code
-"""
-from __future__ import division
-import math
-import json
-import random
-import pprint
-import scipy.misc
+# -*- coding: utf-8 -*-
+__author__ = 'keven'
+
+import sys
 import numpy as np
-from time import gmtime, strftime
-from six.moves import xrange
-
+import networkx as nx
+import cPickle as cp
+import scipy.sparse as sp
 import tensorflow as tf
-import tensorflow.contrib.slim as slim
+from scipy.sparse.linalg.eigen.arpack import eigsh
 
-try:
-    image_summary = tf.image_summary
-    scalar_summary = tf.scalar_summary
-    histogram_summary = tf.histogram_summary
-    merge_summary = tf.merge_summary
-    SummaryWriter = tf.train.SummaryWriter
-except:
-    image_summary = tf.summary.image
-    scalar_summary = tf.summary.scalar
-    histogram_summary = tf.summary.histogram
-    merge_summary = tf.summary.merge
-    SummaryWriter = tf.summary.FileWriter
-
-if "concat_v2" in dir(tf):
-    def concat(tensors, axis, *args, **kwargs):
-        return tf.concat_v2(tensors, axis, *args, **kwargs)
-else:
-    def concat(tensors, axis, *args, **kwargs):
-        return tf.concat(tensors, axis, *args, **kwargs)
-
-
-class batch_norm(object):
-    def __init__(self, epsilon=1e-5, momentum=0.9, name="batch_norm"):
-        with tf.variable_scope(name):
-            self.epsilon = epsilon
-            self.momentum = momentum
-            self.name = name
-
-    def __call__(self, x, train=True):
-        return tf.contrib.layers.batch_norm(x,
-                                            decay=self.momentum,
-                                            updates_collections=None,
-                                            epsilon=self.epsilon,
-                                            scale=True,
-                                            is_training=train,
-                                            scope=self.name)
+def read_network(max_node_num=10000):
+    # read the network from input file
+    G = nx.DiGraph()
+    edges = []
+    network_file = "weibo_network.txt"
+    f = open(network_file)
+    num_nodes, num_edges = map(int, f.readline().strip().split("\t"))
+    for i in range(max_node_num):
+        line = map(int, f.readline().strip().split("\t"))
+        v_id, v_num_edges = line[0], line[1]
+        new_edges = [(v_id, line[2 + 2 * i]) for i in range(v_num_edges) if line[2 + 2 * i]<max_node_num]
+        di_edges = [(line[2 + 2 * i], v_id) for i in range(v_num_edges) if line[2 + 2 * i]<max_node_num and line[3 + 2 * i]==1]
+        edges += new_edges
+        edges += di_edges
+    f.close()
+    G.add_edges_from(edges)
+    print "network read done"
+    return G
 
 
-def conv_cond_concat(x, y):
-    """Concatenate conditioning vector on feature map axis."""
-    x_shapes = x.get_shape()
-    y_shapes = y.get_shape()
-    return concat([
-        x, y * tf.ones([x_shapes[0], x_shapes[1], x_shapes[2], y_shapes[3]])], 3)
+def read_map(max_node_num=10000):
+    node2id = dict()
+    map_file = "uidlist.txt"
+    f = open(map_file)
+    for i, line in enumerate(f):
+        if i >= max_node_num:break
+        node2id[line.strip()] = i
+    f.close()
+    print "map read done"
+    return node2id
 
 
-def conv2d(input_, output_dim,
-           k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02,
-           name="conv2d"):
-    with tf.variable_scope(name):
-        w = tf.get_variable('w', [k_h, k_w, input_.get_shape()[-1], output_dim],
-                            initializer=tf.truncated_normal_initializer(stddev=stddev))
-        conv = tf.nn.conv2d(input_, w, strides=[1, d_h, d_w, 1], padding='SAME')
-
-        biases = tf.get_variable('biases', [output_dim], initializer=tf.constant_initializer(0.0))
-        conv = tf.reshape(tf.nn.bias_add(conv, biases), conv.get_shape())
-
-        return conv
-
-
-def deconv2d(input_, output_shape,
-             k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02,
-             name="deconv2d", with_w=False):
-    with tf.variable_scope(name):
-        # filter : [height, width, output_channels, in_channels]
-        w = tf.get_variable('w', [k_h, k_w, output_shape[-1], input_.get_shape()[-1]],
-                            initializer=tf.random_normal_initializer(stddev=stddev))
-
-        try:
-            deconv = tf.nn.conv2d_transpose(input_, w, output_shape=output_shape,
-                                            strides=[1, d_h, d_w, 1])
-
-        # Support for verisons of TensorFlow before 0.7.0
-        except AttributeError:
-            deconv = tf.nn.deconv2d(input_, w, output_shape=output_shape,
-                                    strides=[1, d_h, d_w, 1])
-
-        biases = tf.get_variable('biases', [output_shape[-1]], initializer=tf.constant_initializer(0.0))
-        deconv = tf.reshape(tf.nn.bias_add(deconv, biases), deconv.get_shape())
-
-        if with_w:
-            return deconv, w, biases
-        else:
-            return deconv
+def read_diffusion(node2id, max_node_num=10000):
+    m_info_dict = dict()
+    m_retweet_dict = dict()
+    diffusion_file = "total.txt"
+    f = open(diffusion_file)
+    iter = 0
+    while 1:
+        line = f.readline()
+        if not line:
+            break
+        m_id, m_time, u_id, retweet_num = line.strip().split(" ")
+        id_time_temp = f.readline().strip().split(" ")
+        id_time_list = [[id_time_temp[2 * i], id_time_temp[2 * i + 1]] for i in range(len(id_time_temp) / 2)
+                        if id_time_temp[2 * i] in node2id and node2id[id_time_temp[2 * i]]<max_node_num]
+        if len(id_time_list) > 0:
+            m_info_dict[m_id] = [m_time, u_id, int(retweet_num)]
+            m_retweet_dict[m_id] = id_time_list
+        iter += 1
+        if iter % 10000 ==0:
+            print "%dth diffusion" % (iter,)
+    f.close()
+    print "diffusion read done"
+    return m_info_dict, m_retweet_dict
 
 
-def lrelu(x, leak=0.2, name="lrelu"):
-    return tf.maximum(x, leak * x)
+def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=10, length=30):
+    # extract a dense sub graph
+    sub_retweet = []
+    user_retweet = [[]] * len(node2id)
+    for m_id, info in m_info.items():
+        if info[2] > length:
+            for user, time in m_retweet[m_id]:
+                user_retweet[node2id[user]].append([m_id, time])
+    print "user retweet collect done"
+
+    degree_dict = graph.in_degree()
+    ordered_degree = sorted(degree_dict.items(), key=lambda a: a[1], reverse=True)
+    selected_node_list = [node[0] for node in ordered_degree[:num_node]]
+    selected_node_dict = dict(zip(selected_node_list, [True] * len(selected_node_list)))
+    for node in selected_node_list:
+        for v, u in graph.out_edges(node):
+            selected_node_dict[u] = True
+
+    retweet_dict = dict()
+    sub_graph = graph.subgraph(selected_node_dict.keys())
+    print "subgraph extract done"
+
+    for node in selected_node_dict.keys():
+        for m_id, time in user_retweet[node]:
+            if m_id not in retweet_dict:
+                retweet_dict[m_id] = [[node, time]]
+            else:
+                retweet_dict[m_id].append([node, time])
+
+    print "message select done"
+    for m_id, retweet_info in retweet_dict.items():
+        while len(retweet_info) >= length:
+            diff_node_list = sorted(retweet_info[:length], key= lambda a: a[1], reverse=False)
+            sub_retweet.append([a[0] for a in diff_node_list])
+            retweet_info = retweet_info[length:]
+    return sub_graph, sub_retweet
 
 
-def linear(input_, output_size, scope=None, stddev=0.02, bias_start=0.0, with_w=False):
-    shape = input_.get_shape().as_list()
+def save_data(subgraph, sub_retweet, length=30):
+    # save data to file
+    node2id = dict([(node, vid) for vid, node in enumerate(subgraph.nodes())])
+    print "remap node done"
 
-    with tf.variable_scope(scope or "Linear"):
-        matrix = tf.get_variable("Matrix", [shape[1], output_size], tf.float32,
-                                 tf.random_normal_initializer(stddev=stddev))
-        bias = tf.get_variable("bias", [output_size],
-                               initializer=tf.constant_initializer(bias_start))
-        if with_w:
-            return tf.matmul(input_, matrix) + bias, matrix, bias
-        else:
-            return tf.matmul(input_, matrix) + bias
+    graph_file = "graph.txt"
+    f_graph = open(graph_file, 'w')
+    f_graph.write("\n".join([str(node2id[v]) + " " + str(node2id[u]) for v, u in subgraph.edges()]))
+    f_graph.close()
+    print "graph write done with %d nodes and %d edges" % (subgraph.number_of_nodes(), subgraph.number_of_edges())
 
+    diff_data = np.zeros((len(sub_retweet), length), dtype=np.int)
+    for i, retweet in enumerate(sub_retweet):
+        for j, node in enumerate(retweet):
+            diff_data[i, j] = 1
 
-pp = pprint.PrettyPrinter()
-
-get_stddev = lambda x, k_h, k_w: 1/math.sqrt(k_w*k_h*x.get_shape()[-1])
-
-
-def show_all_variables():
-  model_vars = tf.trainable_variables()
-  slim.model_analyzer.analyze_vars(model_vars, print_info=True)
-
-
-def inverse_transform(images):
-  return (images+1.)/2.
+    diffusion_data_file = "diffusion.pkl"
+    diff_train = diff_data[:int(len(sub_retweet) * 0.8)]
+    diff_test = diff_data[int(len(sub_retweet) * 0.8):]
+    data = {"train":diff_train, "test":diff_test}
+    with open(diffusion_data_file, 'w') as f:
+        cp.dump(data, f)
+    print "diffusion write done with %d diffusion path" % (len(sub_retweet))
 
 
-def merge(images, size):
-  h, w = images.shape[1], images.shape[2]
-  if (images.shape[3] in (3,4)):
-    c = images.shape[3]
-    img = np.zeros((h * size[0], w * size[1], c))
-    for idx, image in enumerate(images):
-      i = idx % size[1]
-      j = idx // size[1]
-      img[j * h:j * h + h, i * w:i * w + w, :] = image
-    return img
-  elif images.shape[3]==1:
-    img = np.zeros((h * size[0], w * size[1]))
-    for idx, image in enumerate(images):
-      i = idx % size[1]
-      j = idx // size[1]
-      img[j * h:j * h + h, i * w:i * w + w] = image[:,:,0]
-    return img
-  else:
-    raise ValueError('in merge(images,size) images parameter '
-                     'must have dimensions: HxW or HxWx3 or HxWx4')
+
+train_pos = 0
+test_pos = 0
+all_data = None
+
+def prepare_data(data_file="diffusion.pkl"):
+    global all_data
+    with open(data_file, 'r') as f:
+        all_data = cp.load(f)
 
 
-def imsave(images, size, path):
-  image = np.squeeze(merge(images, size))
-  return scipy.misc.imsave(path, image)
+def get_diffusion_matrix(diff_batch, num_node=181):
+    diff_data = np.zeros((diff_batch.shape[0], diff_batch.shape[1], num_node), dtype=np.float)
+    for i in range(diff_data.shape[0]):
+        for j in range(diff_data.shape[1]):
+            diff_data[i, j, diff_batch[i, j]] = 1.0
+    return diff_data
 
 
-def save_images(images, size, image_path):
-  return imsave(inverse_transform(images), size, image_path)
+def train_next_batch(batch_size):
+    global train_pos, all_data
+    if train_pos + batch_size > all_data["train"].shape[0]:
+        train_pos = 0
+    batch_data = get_diffusion_matrix(all_data["train"][train_pos:train_pos + batch_size])
+    train_pos += batch_size
+    return batch_data
 
 
-def make_gif(images, fname, duration=2, true_image=False):
-  import moviepy.editor as mpy
+def test_next_batch(batch_size):
+    global test_pos, all_data
+    if test_pos + batch_size > all_data["test"].shape[0]:
+        test_pos = 0
+    batch_data = get_diffusion_matrix(all_data["test"][test_pos:test_pos + batch_size])
+    test_pos += batch_size
+    return batch_data
 
-  def make_frame(t):
-    try:
-      x = images[int(len(images)/duration*t)]
-    except:
-      x = images[-1]
 
-    if true_image:
-      return x.astype(np.uint8)
-    else:
-      return ((x+1)/2*255).astype(np.uint8)
+def normalize_adj(adj):
+    """Symmetrically normalize adjacency matrix."""
+    adj = sp.coo_matrix(adj)
+    rowsum = np.array(adj.sum(1))
+    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
+    return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
 
-  clip = mpy.VideoClip(make_frame, duration=duration)
-  clip.write_gif(fname, fps = len(images) / duration)
 
-def visualize(sess, dcgan, config, option):
-  image_frame_dim = int(math.ceil(config.batch_size**.5))
-  if option == 0:
-    z_sample = np.random.uniform(-0.5, 0.5, size=(config.batch_size, dcgan.z_dim))
-    samples = sess.run(dcgan.sampler, feed_dict={dcgan.z: z_sample})
-    save_images(samples, [image_frame_dim, image_frame_dim], './samples/test_%s.png' % strftime("%Y%m%d%H%M%S", gmtime()))
-  elif option == 1:
-    values = np.arange(0, 1, 1./config.batch_size)
-    for idx in xrange(100):
-      print(" [*] %d" % idx)
-      z_sample = np.zeros([config.batch_size, dcgan.z_dim])
-      for kdx, z in enumerate(z_sample):
-        z[idx] = values[kdx]
+def chebyshev_polynomials(adj, k):
+    """Calculate Chebyshev polynomials up to order k. Return a list of sparse matrices (tuple representation)."""
+    print("Calculating Chebyshev polynomials up to order {}...".format(k))
 
-      if config.dataset == "mnist":
-        y = np.random.choice(10, config.batch_size)
-        y_one_hot = np.zeros((config.batch_size, 10))
-        y_one_hot[np.arange(config.batch_size), y] = 1
+    adj_normalized = normalize_adj(adj)
+    laplacian = np.eye(adj.shape[0]) - adj_normalized
+    largest_eigval, _ = eigsh(laplacian, 1, which='LM')
+    scaled_laplacian = (2. / largest_eigval[0]) * laplacian - sp.eye(adj.shape[0])
 
-        samples = sess.run(dcgan.sampler, feed_dict={dcgan.z: z_sample, dcgan.y: y_one_hot})
-      else:
-        samples = sess.run(dcgan.sampler, feed_dict={dcgan.z: z_sample})
+    t_k = np.zeros((k, adj.shape[0], adj.shape[1]), dtype=np.float)
+    t_k[0] = np.eye(adj.shape[0])
+    t_k[1] = np.asarray(scaled_laplacian)
 
-      save_images(samples, [image_frame_dim, image_frame_dim], './samples/test_arange_%s.png' % (idx))
-  elif option == 2:
-    values = np.arange(0, 1, 1./config.batch_size)
-    for idx in [random.randint(0, 99) for _ in xrange(100)]:
-      print(" [*] %d" % idx)
-      z = np.random.uniform(-0.2, 0.2, size=(dcgan.z_dim))
-      z_sample = np.tile(z, (config.batch_size, 1))
-      #z_sample = np.zeros([config.batch_size, dcgan.z_dim])
-      for kdx, z in enumerate(z_sample):
-        z[idx] = values[kdx]
+    def chebyshev_recurrence(t_k_minus_one, t_k_minus_two, scaled_lap):
+        s_lap = sp.csr_matrix(scaled_lap, copy=True)
+        return 2 * s_lap.dot(t_k_minus_one) - t_k_minus_two
 
-      if config.dataset == "mnist":
-        y = np.random.choice(10, config.batch_size)
-        y_one_hot = np.zeros((config.batch_size, 10))
-        y_one_hot[np.arange(config.batch_size), y] = 1
+    for i in range(2, k):
+        t_k[i] = chebyshev_recurrence(t_k[i-1], t_k[i-2], scaled_laplacian)
 
-        samples = sess.run(dcgan.sampler, feed_dict={dcgan.z: z_sample, dcgan.y: y_one_hot})
-      else:
-        samples = sess.run(dcgan.sampler, feed_dict={dcgan.z: z_sample})
+    return np.asarray(t_k)
 
-      try:
-        make_gif(samples, './samples/test_gif_%s.gif' % (idx))
-      except:
-        save_images(samples, [image_frame_dim, image_frame_dim], './samples/test_%s.png' % strftime("%Y%m%d%H%M%S", gmtime()))
-  elif option == 3:
-    values = np.arange(0, 1, 1./config.batch_size)
-    for idx in xrange(100):
-      print(" [*] %d" % idx)
-      z_sample = np.zeros([config.batch_size, dcgan.z_dim])
-      for kdx, z in enumerate(z_sample):
-        z[idx] = values[kdx]
 
-      samples = sess.run(dcgan.sampler, feed_dict={dcgan.z: z_sample})
-      make_gif(samples, './samples/test_gif_%s.gif' % (idx))
-  elif option == 4:
-    image_set = []
-    values = np.arange(0, 1, 1./config.batch_size)
+def load_gcn_data(filename, num_support):
+    graph = nx.read_edgelist(filename, nodetype=int, create_using=nx.DiGraph())
+    adj = nx.adjacency_matrix(graph)
+    lap_list = chebyshev_polynomials(adj, k=num_support)
+    return lap_list
 
-    for idx in xrange(100):
-      print(" [*] %d" % idx)
-      z_sample = np.zeros([config.batch_size, dcgan.z_dim])
-      for kdx, z in enumerate(z_sample): z[idx] = values[kdx]
 
-      image_set.append(sess.run(dcgan.sampler, feed_dict={dcgan.z: z_sample}))
-      make_gif(image_set[-1], './samples/test_gif_%s.gif' % (idx))
+def glorot(shape, name=None):
+    # weight init
+    init_range = np.sqrt(6.0/(shape[0]+shape[1]))
+    initial = tf.random_uniform(shape, minval=-init_range, maxval=init_range, dtype=tf.float32)
+    return tf.Variable(initial, name=name)
 
-    new_image_set = [merge(np.array([images[idx] for images in image_set]), [10, 10]) \
-        for idx in range(64) + range(63, -1, -1)]
-    make_gif(new_image_set, './samples/test_gif_merged.gif', duration=8)
+
+def main():
+    graph = read_network()
+    node2id = read_map()
+    m_info, m_retweet = read_diffusion(node2id)
+    sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet)
+    save_data(sub_graph, sub_retweet)
+
+    prepare_data()
+    batch_data = train_next_batch(batch_size=128)
+
+if __name__ == '__main__':
+    sys.exit(main())
+
+
