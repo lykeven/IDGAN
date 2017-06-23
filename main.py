@@ -49,6 +49,8 @@ def parse_args():
 						help='Interval of print information. Default is 100.')
 	parser.add_argument('-num_support', type=int, default=5,
 						help='Number of highest order laplacian matrix. Default is 5.')
+	parser.add_argument('-gcn', type=int, default=0,
+						help='Whether use GCN to train GAN model. Default is 0.')
 
 	return parser.parse_args()
 
@@ -77,10 +79,11 @@ if __name__ == '__main__':
     print_interval = args.print_interval
     num_support = args.num_support
 
-    # model = gan_rnn.GAN_RNN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate, g_epochs,
-    #                         d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs, num_epochs, print_interval)
-
-    model = gan_rnn_gcn.GAN_RNN_GCN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate,
+    if args.gcn == 0:
+        model = gan_rnn.GAN_RNN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate, g_epochs,
+                            d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs, num_epochs, print_interval)
+    else:
+        model = gan_rnn_gcn.GAN_RNN_GCN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate,
                                     g_epochs, d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs,
                                     num_epochs, print_interval, num_support, graph_file, data_file)
     model.build_model()

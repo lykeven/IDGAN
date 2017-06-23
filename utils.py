@@ -166,6 +166,31 @@ def test_next_batch(batch_size):
     return batch_data
 
 
+def load_gcn_data(filename, num_support):
+    graph = nx.read_edgelist(filename, nodetype=int, create_using=nx.DiGraph())
+    adj = nx.adjacency_matrix(graph)
+    lap_list = chebyshev_polynomials(adj, k=num_support)
+    return lap_list
+
+
+def feed_data(batch_size, input_step, input_size, is_train=True):
+    if is_train:
+        batch_temp = train_next_batch(batch_size * 2)
+    else:
+        batch_temp = test_next_batch(batch_size * 2)
+    batch_temp = batch_temp.reshape((batch_size * 2, input_step * 2, input_size))
+    batch_z = batch_temp[:batch_size, :input_step]
+    batch_x = batch_temp[batch_size:batch_size * 2, :]
+    return batch_z, batch_x
+
+
+def glorot(shape, name=None):
+    # weight init
+    init_range = np.sqrt(6.0/(shape[0]+shape[1]))
+    initial = tf.random_uniform(shape, minval=-init_range, maxval=init_range, dtype=tf.float32)
+    return tf.Variable(initial, name=name)
+
+
 def normalize_adj(adj):
     """Symmetrically normalize adjacency matrix."""
     adj = sp.coo_matrix(adj)
@@ -197,20 +222,6 @@ def chebyshev_polynomials(adj, k):
         t_k[i] = chebyshev_recurrence(t_k[i-1], t_k[i-2], scaled_laplacian)
 
     return np.asarray(t_k)
-
-
-def load_gcn_data(filename, num_support):
-    graph = nx.read_edgelist(filename, nodetype=int, create_using=nx.DiGraph())
-    adj = nx.adjacency_matrix(graph)
-    lap_list = chebyshev_polynomials(adj, k=num_support)
-    return lap_list
-
-
-def glorot(shape, name=None):
-    # weight init
-    init_range = np.sqrt(6.0/(shape[0]+shape[1]))
-    initial = tf.random_uniform(shape, minval=-init_range, maxval=init_range, dtype=tf.float32)
-    return tf.Variable(initial, name=name)
 
 
 def main():

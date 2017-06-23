@@ -3,7 +3,6 @@ __author__ = 'keven'
 
 import numpy as np
 import tensorflow as tf
-import sys
 import utils
 
 
@@ -147,35 +146,21 @@ class GAN_RNN_GCN():
 
         for i in range(self.num_epochs):
             for j in range(self.d_epochs):
-                batch_temp = utils.train_next_batch(self.g_batch_size * 2)
-                batch_temp = batch_temp.reshape((self.g_batch_size * 2, self.d_input_step, self.d_input_size))
-                batch_z = batch_temp[:self.g_batch_size, :self.g_input_step]
-                batch_x = batch_temp[self.g_batch_size:self.g_batch_size * 2, :]
+                batch_z, batch_x = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 sess.run(d_optim, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
 
             for j in range(self.g_epochs):
-                batch_temp = utils.train_next_batch(self.g_batch_size * 2)
-                batch_temp = batch_temp.reshape((self.g_batch_size * 2, self.d_input_step, self.d_input_size))
-                batch_z = batch_temp[:self.g_batch_size, :self.g_input_step]
-                batch_x = batch_temp[self.g_batch_size:self.g_batch_size * 2, :]
+                batch_z, batch_x = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 sess.run(g_optim, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
 
             if i % self.print_interval == 0:
-                batch_temp = utils.train_next_batch(self.g_batch_size * 2)
-                batch_temp = batch_temp.reshape((self.g_batch_size * 2, self.d_input_step, self.d_input_size))
-                batch_z = batch_temp[:self.g_batch_size, :self.g_input_step]
-                batch_x = batch_temp[self.g_batch_size:self.g_batch_size * 2, :]
-
+                batch_z, batch_x = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z, self.lap: self.lap_list})
                 d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
                 print "Iter %d, g_loss = %.5f, d_loss = %.5f" % (i, g_loss, d_loss)
 
         # test performance
-        test_len = self.g_batch_size * 2
-        batch_temp = utils.test_next_batch[:test_len].reshape((self.g_batch_size * 2, self.d_input_step, self.d_input_size))
-        test_z = batch_temp[:self.g_batch_size, :self.g_input_step]
-        test_x = batch_temp[self.g_batch_size:self.g_batch_size * 2, :]
-
+        test_z, test_x = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size, is_train=False)
         g_loss = sess.run(self.g_loss, feed_dict={self.z: test_z, self.lap: self.lap_list})
         d_loss = sess.run(self.d_loss, feed_dict={self.z: test_z, self.x: test_x, self.lap: self.lap_list})
         print "Testing Loss: g_loss = %.5f, d_loss = %.5f" % (g_loss, d_loss)
