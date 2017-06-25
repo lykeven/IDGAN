@@ -118,7 +118,7 @@ def save_data(subgraph, sub_retweet, length=30):
     diff_data = np.zeros((len(sub_retweet), length), dtype=np.int)
     for i, retweet in enumerate(sub_retweet):
         for j, node in enumerate(retweet):
-            diff_data[i, j] = 1
+            diff_data[i, j] = node2id[node]
 
     diffusion_data_file = "diffusion.pkl"
     diff_train = diff_data[:int(len(sub_retweet) * 0.8)]
@@ -148,20 +148,20 @@ def get_diffusion_matrix(diff_batch, num_node=181):
     return diff_data
 
 
-def train_next_batch(batch_size):
+def train_next_batch(batch_size, input_size=181):
     global train_pos, all_data
     if train_pos + batch_size > all_data["train"].shape[0]:
         train_pos = 0
-    batch_data = get_diffusion_matrix(all_data["train"][train_pos:train_pos + batch_size])
+    batch_data = get_diffusion_matrix(all_data["train"][train_pos:train_pos + batch_size], input_size)
     train_pos += batch_size
     return batch_data
 
 
-def test_next_batch(batch_size):
+def test_next_batch(batch_size, input_size=181):
     global test_pos, all_data
     if test_pos + batch_size > all_data["test"].shape[0]:
         test_pos = 0
-    batch_data = get_diffusion_matrix(all_data["test"][test_pos:test_pos + batch_size])
+    batch_data = get_diffusion_matrix(all_data["test"][test_pos:test_pos + batch_size], input_size)
     test_pos += batch_size
     return batch_data
 
@@ -175,13 +175,13 @@ def load_gcn_data(filename, num_support):
 
 def feed_data(batch_size, input_step, input_size, is_train=True):
     if is_train:
-        batch_temp = train_next_batch(batch_size * 2)
+        batch_temp = train_next_batch(batch_size * 2, input_size)
     else:
-        batch_temp = test_next_batch(batch_size * 2)
-    batch_temp = batch_temp.reshape((batch_size * 2, input_step * 2, input_size))
+        batch_temp = test_next_batch(batch_size * 2, input_size)
     batch_z = batch_temp[:batch_size, :input_step]
+    batch_z_target = batch_temp[:batch_size, input_step:input_step * 2]
     batch_x = batch_temp[batch_size:batch_size * 2, :]
-    return batch_z, batch_x
+    return batch_z, batch_x, batch_z_target
 
 
 def glorot(shape, name=None):
@@ -225,11 +225,11 @@ def chebyshev_polynomials(adj, k):
 
 
 def main():
-    graph = read_network()
-    node2id = read_map()
-    m_info, m_retweet = read_diffusion(node2id)
-    sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet)
-    save_data(sub_graph, sub_retweet)
+    # graph = read_network()
+    # node2id = read_map()
+    # m_info, m_retweet = read_diffusion(node2id)
+    # sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet)
+    # save_data(sub_graph, sub_retweet)
 
     prepare_data()
     batch_data = train_next_batch(batch_size=128)

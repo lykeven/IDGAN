@@ -45,6 +45,8 @@ def parse_args():
 
 	parser.add_argument('-num_epochs', type=int, default=3000,
 						help='Number of iteration for gan. Default is 3000.')
+	parser.add_argument('-num_epochs_test', type=int, default=30,
+						help='Number of iteration for gan. Default is 30.')
 	parser.add_argument('-print_interval', type=int, default=100,
 						help='Interval of print information. Default is 100.')
 	parser.add_argument('-num_support', type=int, default=5,
@@ -76,16 +78,18 @@ if __name__ == '__main__':
     d_epochs = args.d_epochs
 
     num_epochs = args.num_epochs
+    num_epochs_test = args.num_epochs_test
     print_interval = args.print_interval
     num_support = args.num_support
 
     if args.gcn == 0:
         model = gan_rnn.GAN_RNN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate, g_epochs,
-                            d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs, num_epochs, print_interval)
+                            d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs, num_epochs,
+                            print_interval, num_epochs_test, data_file)
     else:
         model = gan_rnn_gcn.GAN_RNN_GCN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate,
                                     g_epochs, d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs,
-                                    num_epochs, print_interval, num_support, graph_file, data_file)
+                                    num_epochs, print_interval,num_epochs_test, num_support, graph_file, data_file)
     model.build_model()
     model.train()
 
