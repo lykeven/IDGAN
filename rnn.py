@@ -19,7 +19,7 @@ def bias_variable(shape):
 
 class RNN():
     def __init__(self, input_step=14, input_size=28, hidden_size=50, output_step=28, batch_size=50, rate=2e-4,
-                 epochs=1,  print_interval=10, num_epochs_test=30, data_file="diffusion.pkl"):
+                 epochs=1,  print_interval=10, num_epochs_test=30, attention=0, data_file="diffusion.pkl"):
         self.input_step = input_step
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -30,6 +30,7 @@ class RNN():
 
         self.print_interval = print_interval
         self.num_epochs_test = num_epochs_test
+        self.attention = attention
         self.data_file = data_file
 
 
@@ -39,8 +40,15 @@ class RNN():
             g_lstm_cell = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
             g_lstm_cell_1 = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
 
-            g_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(g_lstm_cell, output_keep_prob=0.9)
-            g_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_1, output_keep_prob=0.9)
+            g_lstm_cell_attention = tf.contrib.rnn.AttentionCellWrapper(g_lstm_cell, attn_length=10)
+            g_lstm_cell_attention_1 = tf.contrib.rnn.AttentionCellWrapper(g_lstm_cell_1, attn_length=10)
+
+            if self.attention == 1:
+                g_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_attention, output_keep_prob=0.9)
+                g_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_attention_1, output_keep_prob=0.9)
+            else:
+                g_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(g_lstm_cell, output_keep_prob=0.9)
+                g_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_1, output_keep_prob=0.9)
 
             g_cell = tf.contrib.rnn.MultiRNNCell([g_lstm_cell_drop, g_lstm_cell_drop_1], state_is_tuple=True)
             g_state_ = g_cell.zero_state(batch_size, tf.float32)
@@ -67,7 +75,11 @@ class RNN():
         self.z_t = tf.placeholder(tf.float32, [None, self.input_step, self.input_size])
         self.z_ = self.generator(self.z, self.input_step, self.input_size, self.hidden_size, self.batch_size)
 
-        self.loss = tf.losses.mean_squared_error(self.z_, self.z_t)
+        # self.loss = tf.losses.mean_squared_error(self.z_, self.z_t)
+        labels = tf.reshape(self.z_t, [self.batch_size * self.input_step, self.input_size])
+        logits = tf.reshape(self.z_, [self.batch_size * self.input_step, self.input_size])
+        self.loss = tf.losses.softmax_cross_entropy(onehot_labels=labels, logits=logits)
+
 
         def compute_accuracy(x, y):
             intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))

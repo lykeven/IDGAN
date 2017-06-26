@@ -20,7 +20,7 @@ def bias_variable(shape):
 class GAN_RNN():
     def __init__(self, g_input_step=14, g_input_size=28, g_hidden_size=50, g_output_step=28, g_batch_size=50, g_rate=2e-4,
                  g_epochs=1, d_input_step=28, d_input_size=28, d_hidden_size=50, d_batch_size=50, d_rate=2e-4, d_epochs=1,
-                 num_epochs=100, print_interval=10, num_epochs_test=30, data_file="diffusion.pkl"):
+                 num_epochs=100, print_interval=10, num_epochs_test=30, attention=0, data_file="diffusion.pkl"):
         self.g_input_step = g_input_step
         self.g_input_size = g_input_size
         self.g_hidden_size = g_hidden_size
@@ -39,6 +39,7 @@ class GAN_RNN():
         self.num_epochs = num_epochs
         self.print_interval = print_interval
         self.num_epochs_test = num_epochs_test
+        self.attention = attention
         self.data_file = data_file
 
 
@@ -48,8 +49,15 @@ class GAN_RNN():
             g_lstm_cell = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
             g_lstm_cell_1 = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
 
-            g_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(g_lstm_cell, output_keep_prob=0.9)
-            g_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_1, output_keep_prob=0.9)
+            g_lstm_cell_attention = tf.contrib.rnn.AttentionCellWrapper(g_lstm_cell, attn_length=10)
+            g_lstm_cell_attention_1 = tf.contrib.rnn.AttentionCellWrapper(g_lstm_cell_1, attn_length=10)
+
+            if self.attention == 1:
+                g_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_attention, output_keep_prob=0.9)
+                g_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_attention_1, output_keep_prob=0.9)
+            else:
+                g_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(g_lstm_cell, output_keep_prob=0.9)
+                g_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_1, output_keep_prob=0.9)
 
             g_cell = tf.contrib.rnn.MultiRNNCell([g_lstm_cell_drop, g_lstm_cell_drop_1], state_is_tuple=True)
             g_state_ = g_cell.zero_state(batch_size, tf.float32)
@@ -82,8 +90,15 @@ class GAN_RNN():
             d_lstm_cell = tf.contrib.rnn.BasicLSTMCell(hidden_size, forget_bias=0.0, state_is_tuple=True)
             d_lstm_cell_1 = tf.contrib.rnn.BasicLSTMCell(hidden_size / 2, forget_bias=0.0, state_is_tuple=True)
 
-            d_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(d_lstm_cell, output_keep_prob=0.9)
-            d_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(d_lstm_cell_1, output_keep_prob=0.9)
+            d_lstm_cell_attention = tf.contrib.rnn.AttentionCellWrapper(d_lstm_cell, attn_length=10)
+            d_lstm_cell_attention_1 = tf.contrib.rnn.AttentionCellWrapper(d_lstm_cell_1, attn_length=10)
+
+            if self.attention == 1:
+                d_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(d_lstm_cell_attention, output_keep_prob=0.9)
+                d_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(d_lstm_cell_attention_1, output_keep_prob=0.9)
+            else:
+                d_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(d_lstm_cell, output_keep_prob=0.9)
+                d_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(d_lstm_cell_1, output_keep_prob=0.9)
 
             d_cell = tf.contrib.rnn.MultiRNNCell([d_lstm_cell_drop, d_lstm_cell_drop_1], state_is_tuple=True)
             d_state_ = d_cell.zero_state(batch_size, tf.float32)
