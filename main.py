@@ -5,6 +5,7 @@ import numpy as np
 import argparse
 import gan_rnn
 import gan_rnn_gcn
+import rnn
 
 
 def parse_args():
@@ -90,6 +91,8 @@ if __name__ == '__main__':
         model = gan_rnn_gcn.GAN_RNN_GCN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate,
                                     g_epochs, d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs,
                                     num_epochs, print_interval,num_epochs_test, num_support, graph_file, data_file)
+    # model = rnn.RNN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate, num_epochs,
+    #                 print_interval, num_epochs_test, data_file)
     model.build_model()
     model.train()
 

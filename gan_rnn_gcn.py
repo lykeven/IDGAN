@@ -36,17 +36,16 @@ class GAN_RNN_GCN():
     def generator(self, input, input_step, input_size, hidden_size, batch_size, reuse=False):
         with tf.variable_scope("generator") as scope:
             # lstm cell and wrap with dropout
-            g_lstm_cell = tf.contrib.rnn.BasicLSTMCell(hidden_size / 2, forget_bias=0.0, state_is_tuple=True)
-            g_lstm_cell_1 = tf.contrib.rnn.BasicLSTMCell(hidden_size, forget_bias=0.0, state_is_tuple=True)
+            g_lstm_cell = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
+            g_lstm_cell_1 = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
 
             g_lstm_cell_drop = tf.contrib.rnn.DropoutWrapper(g_lstm_cell, output_keep_prob=0.9)
             g_lstm_cell_drop_1 = tf.contrib.rnn.DropoutWrapper(g_lstm_cell_1, output_keep_prob=0.9)
 
             g_cell = tf.contrib.rnn.MultiRNNCell([g_lstm_cell_drop, g_lstm_cell_drop_1], state_is_tuple=True)
             g_state_ = g_cell.zero_state(batch_size, tf.float32)
-
-            g_W_o = utils.glorot([hidden_size, input_size])
-            g_b_o = tf.Variable(tf.random_normal([input_size]))
+            # g_W_o = utils.glorot([hidden_size, input_size])
+            # g_b_o = tf.Variable(tf.random_normal([input_size]))
 
             # neural network
             g_outputs = []
@@ -57,8 +56,8 @@ class GAN_RNN_GCN():
                 g_outputs.append(g_cell_output)  # output: shape[input_step][batch_size, hidden_size]
 
             # expend outputs to [batch_size, hidden_size * input_step] and then reshape to [batch_size * input_steps, hidden_size]
-            g_output = tf.reshape(tf.concat(g_outputs, axis=1), [-1, hidden_size])
-            g_y_soft = tf.nn.softmax(tf.matmul(g_output, g_W_o) + g_b_o)
+            g_output = tf.reshape(tf.concat(g_outputs, axis=1), [-1, input_size])
+            g_y_soft = tf.nn.softmax(g_output)
             self.z_ = tf.reshape(g_y_soft, [batch_size, input_step, input_size])
 
             # concentrate input and output of rnn
@@ -168,7 +167,8 @@ class GAN_RNN_GCN():
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z, self.lap: self.lap_list})
                 d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
-                print "Iter %d, g_loss = %.5f, d_loss = %.5f" % (i, g_loss, d_loss)
+                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                print "Iter %d, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (i, g_loss, d_loss, accuracy)
 
         # test performance
         g_loss_list = []

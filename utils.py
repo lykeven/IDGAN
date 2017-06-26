@@ -192,7 +192,7 @@ def glorot(shape, name=None):
 
 
 def normalize_adj(adj):
-    """Symmetrically normalize adjacency matrix."""
+    # Symmetrically normalize adjacency matrix
     adj = sp.coo_matrix(adj)
     rowsum = np.array(adj.sum(1))
     d_inv_sqrt = np.power(rowsum, -0.5).flatten()
@@ -202,7 +202,7 @@ def normalize_adj(adj):
 
 
 def chebyshev_polynomials(adj, k):
-    """Calculate Chebyshev polynomials up to order k. Return a list of sparse matrices (tuple representation)."""
+    # Calculate Chebyshev polynomials up to order k.
     print("Calculating Chebyshev polynomials up to order {}...".format(k))
 
     adj_normalized = normalize_adj(adj)
