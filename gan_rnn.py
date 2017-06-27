@@ -148,8 +148,8 @@ class GAN_RNN():
     def train(self,):
         utils.prepare_data(data_file=self.data_file)
 
-        d_optim = tf.train.RMSPropOptimizer(self.d_rate).minimize(self.d_loss)
-        g_optim = tf.train.RMSPropOptimizer(self.g_rate).minimize(self.g_loss)
+        d_optim = tf.train.AdamOptimizer(self.d_rate).minimize(self.d_loss)
+        g_optim = tf.train.AdamOptimizer(self.g_rate).minimize(self.g_loss)
 
         init = tf.global_variables_initializer()
         sess = tf.InteractiveSession()
@@ -157,12 +157,20 @@ class GAN_RNN():
 
         for i in range(self.num_epochs):
             for j in range(self.d_epochs):
-                batch_z, batch_x, _ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
+                batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
+                g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z})
+                d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x})
                 sess.run(d_optim, feed_dict={self.z: batch_z, self.x: batch_x})
+                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                print "Iter %d for D, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy)
 
             for j in range(self.g_epochs):
-                batch_z, batch_x, _ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
+                batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
+                g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z})
+                d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x})
                 sess.run(g_optim, feed_dict={self.z: batch_z, self.x: batch_x})
+                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                print "Iter %d for G, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy)
 
             if i % self.print_interval == 0:
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)

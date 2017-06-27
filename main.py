@@ -17,8 +17,8 @@ def parse_args():
 						help='Input diffusion data')
 	parser.add_argument('-g_input_step', type=int, default=15,
 						help='Length of diffusion instance for generator. Default is 15.')
-	parser.add_argument('-g_input_size', type=int, default=181,
-						help='Number of nodes. Default is 181.')
+	parser.add_argument('-g_input_size', type=int, default=725,
+						help='Number of nodes. Default is 725.')
 	parser.add_argument('-g_hidden_size', type=int, default=64,
 						help='Number of neurons at hidden layer. Default is 64.')
 	parser.add_argument('-g_output_step', type=int, default=30,
@@ -28,7 +28,7 @@ def parse_args():
 
 	parser.add_argument('-d_input_step', type=int, default=30,
 						help='Length of diffusion instance for discriminator. Default is 30.')
-	parser.add_argument('-d_input_size', type=int, default=181,
+	parser.add_argument('-d_input_size', type=int, default=725,
 						help='Number of nodes. Default is 181.')
 	parser.add_argument('-d_hidden_size', type=int, default=64,
 						help='Number of neurons at hidden layer. Default is 64.')

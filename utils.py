@@ -66,7 +66,7 @@ def read_diffusion(node2id, max_node_num=10000):
     return m_info_dict, m_retweet_dict
 
 
-def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=10, length=30):
+def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30):
     # extract a dense sub graph
     sub_retweet = []
     user_retweet = [[]] * len(node2id)
@@ -79,16 +79,17 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=10, length=30)
     degree_dict = graph.in_degree()
     ordered_degree = sorted(degree_dict.items(), key=lambda a: a[1], reverse=True)
     selected_node_list = [node[0] for node in ordered_degree[:num_node]]
-    selected_node_dict = dict(zip(selected_node_list, [True] * len(selected_node_list)))
+    selected_node_dict = dict(zip(selected_node_list, [False] * len(selected_node_list)))
     for node in selected_node_list:
         for v, u in graph.out_edges(node):
+            selected_node_dict[v] = True
             selected_node_dict[u] = True
 
     retweet_dict = dict()
-    sub_graph = graph.subgraph(selected_node_dict.keys())
+    sub_graph = graph.subgraph([key for key, value in selected_node_dict.items() if value==True])
     print "subgraph extract done"
 
-    for node in selected_node_dict.keys():
+    for node in sub_graph.nodes():
         for m_id, time in user_retweet[node]:
             if m_id not in retweet_dict:
                 retweet_dict[m_id] = [[node, time]]
@@ -127,6 +128,9 @@ def save_data(subgraph, sub_retweet, length=30):
     with open(diffusion_data_file, 'w') as f:
         cp.dump(data, f)
     print "diffusion write done with %d diffusion path" % (len(sub_retweet))
+
+    prepare_data()
+    batch_data = train_next_batch(batch_size=128, input_size=subgraph.number_of_nodes())
 
 
 
@@ -220,19 +224,15 @@ def chebyshev_polynomials(adj, k):
 
     for i in range(2, k):
         t_k[i] = chebyshev_recurrence(t_k[i-1], t_k[i-2], scaled_laplacian)
-
     return np.asarray(t_k)
 
 
 def main():
-    # graph = read_network()
-    # node2id = read_map()
-    # m_info, m_retweet = read_diffusion(node2id)
-    # sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet)
-    # save_data(sub_graph, sub_retweet)
-
-    prepare_data()
-    batch_data = train_next_batch(batch_size=128)
+    graph = read_network()
+    node2id = read_map()
+    m_info, m_retweet = read_diffusion(node2id)
+    sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet)
+    save_data(sub_graph, sub_retweet)
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -174,10 +174,19 @@ class GAN_RNN_GCN():
             for j in range(self.d_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 sess.run(d_optim, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
+                g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z, self.lap: self.lap_list})
+                d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
+                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                print "Iter %d for D, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy)
+
 
             for j in range(self.g_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 sess.run(g_optim, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
+                g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z, self.lap: self.lap_list})
+                d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
+                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                print "Iter %d for G, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy)
 
             if i % self.print_interval == 0:
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
