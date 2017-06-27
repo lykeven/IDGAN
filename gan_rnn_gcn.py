@@ -177,7 +177,7 @@ class GAN_RNN_GCN():
                 g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z, self.lap: self.lap_list})
                 d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
                 accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
-                print "Iter %d for D, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy)
+                print("Iter %d for D, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy))
 
 
             for j in range(self.g_epochs):
@@ -186,14 +186,14 @@ class GAN_RNN_GCN():
                 g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z, self.lap: self.lap_list})
                 d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
                 accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
-                print "Iter %d for G, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy)
+                print("Iter %d for G, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy))
 
             if i % self.print_interval == 0:
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z, self.lap: self.lap_list})
                 d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x, self.lap: self.lap_list})
                 accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
-                print "Iter %d, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (i, g_loss, d_loss, accuracy)
+                print("Iter %d, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (i, g_loss, d_loss, accuracy))
 
         # test performance
         g_loss_list = []
@@ -208,8 +208,8 @@ class GAN_RNN_GCN():
             g_loss_list.append(g_loss)
             d_loss_list.append(d_loss)
             accuracy_list.append(accuracy)
-        print "Testing Loss: g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (sum(g_loss_list)/len(g_loss_list),
-                sum(d_loss_list)/len(d_loss_list) , sum(accuracy_list)/ len(accuracy_list))
+        print("Testing Loss: g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (sum(g_loss_list)/len(g_loss_list),
+                sum(d_loss_list)/len(d_loss_list) , sum(accuracy_list)/ len(accuracy_list)))
 
 
 

@@ -13,7 +13,7 @@ def parse_args():
 
 	parser.add_argument('-graph_file', nargs='?', default='graph.txt',
 						help='Graph path')
-	parser.add_argument('-data_file', nargs='?', default='diffusion.pkl',
+	parser.add_argument('-data_file', nargs='?', default='diffusion1.pkl',
 						help='Input diffusion data')
 	parser.add_argument('-g_input_step', type=int, default=15,
 						help='Length of diffusion instance for generator. Default is 15.')

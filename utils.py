@@ -25,7 +25,7 @@ def read_network(max_node_num=10000):
         edges += di_edges
     f.close()
     G.add_edges_from(edges)
-    print "network read done"
+    print("network read done")
     return G
 
 
@@ -37,7 +37,7 @@ def read_map(max_node_num=10000):
         if i >= max_node_num:break
         node2id[line.strip()] = i
     f.close()
-    print "map read done"
+    print("map read done")
     return node2id
 
 
@@ -60,9 +60,9 @@ def read_diffusion(node2id, max_node_num=10000):
             m_retweet_dict[m_id] = id_time_list
         iter += 1
         if iter % 10000 ==0:
-            print "%dth diffusion" % (iter,)
+            print ("%dth diffusion" % (iter,))
     f.close()
-    print "diffusion read done"
+    print("diffusion read done")
     return m_info_dict, m_retweet_dict
 
 
@@ -74,7 +74,7 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
         if info[2] > length:
             for user, time in m_retweet[m_id]:
                 user_retweet[node2id[user]].append([m_id, time])
-    print "user retweet collect done"
+    print("user retweet collect done")
 
     degree_dict = graph.in_degree()
     ordered_degree = sorted(degree_dict.items(), key=lambda a: a[1], reverse=True)
@@ -87,7 +87,7 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
 
     retweet_dict = dict()
     sub_graph = graph.subgraph([key for key, value in selected_node_dict.items() if value==True])
-    print "subgraph extract done"
+    print("subgraph extract done")
 
     for node in sub_graph.nodes():
         for m_id, time in user_retweet[node]:
@@ -96,7 +96,7 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
             else:
                 retweet_dict[m_id].append([node, time])
 
-    print "message select done"
+    print("message select done")
     for m_id, retweet_info in retweet_dict.items():
         while len(retweet_info) >= length:
             diff_node_list = sorted(retweet_info[:length], key= lambda a: a[1], reverse=False)
@@ -108,13 +108,13 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
 def save_data(subgraph, sub_retweet, length=30):
     # save data to file
     node2id = dict([(node, vid) for vid, node in enumerate(subgraph.nodes())])
-    print "remap node done"
+    print("remap node done")
 
     graph_file = "graph.txt"
     f_graph = open(graph_file, 'w')
     f_graph.write("\n".join([str(node2id[v]) + " " + str(node2id[u]) for v, u in subgraph.edges()]))
     f_graph.close()
-    print "graph write done with %d nodes and %d edges" % (subgraph.number_of_nodes(), subgraph.number_of_edges())
+    print("graph write done with %d nodes and %d edges" % (subgraph.number_of_nodes(), subgraph.number_of_edges()))
 
     diff_data = np.zeros((len(sub_retweet), length), dtype=np.int)
     for i, retweet in enumerate(sub_retweet):
@@ -127,7 +127,7 @@ def save_data(subgraph, sub_retweet, length=30):
     data = {"train":diff_train, "test":diff_test}
     with open(diffusion_data_file, 'w') as f:
         cp.dump(data, f)
-    print "diffusion write done with %d diffusion path" % (len(sub_retweet))
+    print("diffusion write done with %d diffusion path" % (len(sub_retweet)))
 
     prepare_data()
     batch_data = train_next_batch(batch_size=128, input_size=subgraph.number_of_nodes())
