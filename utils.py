@@ -4,10 +4,13 @@ __author__ = 'keven'
 import sys
 import numpy as np
 import networkx as nx
-import cPickle as cp
+import pickle as cp
 import scipy.sparse as sp
 import tensorflow as tf
+from sklearn.preprocessing import normalize
 from scipy.sparse.linalg.eigen.arpack import eigsh
+import argparse
+
 
 def read_network(max_node_num=10000):
     # read the network from input file
@@ -39,6 +42,33 @@ def read_map(max_node_num=10000):
     f.close()
     print("map read done")
     return node2id
+
+
+def read_feature(node2id, max_node_num=10000):
+    info_dict = dict()
+    feature_file1 = "user_profile1.txt"
+    feature_file2 = "user_profile2.txt"
+    num_lines = 15
+    i = 0
+    lines = open(feature_file1).readlines()
+    while i <len(lines):
+        if i == 0: i += num_lines
+        ct = lines[i:i + num_lines]
+        if ct[0].strip() in node2id:
+            info = [int(ct[1].strip()), int(ct[4].strip()), int(ct[7].strip()), int(ct[12].strip())]
+            info_dict[node2id[ct[0].strip()]] = info
+        i += num_lines
+
+    i = 0
+    lines = open(feature_file2).readlines()
+    while i <len(lines):
+        ct = lines[i:i + num_lines]
+        if ct[0].strip() in node2id:
+            info = [int(ct[1].strip()), int(ct[4].strip()), int(ct[7].strip()), int(ct[12].strip())]
+            info_dict[node2id[ct[0].strip()]] = info
+        i += num_lines
+    print("features read done")
+    return info_dict
 
 
 def read_diffusion(node2id, max_node_num=10000):
@@ -105,12 +135,11 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
     return sub_graph, sub_retweet
 
 
-def save_data(subgraph, sub_retweet, length=30):
+def save_data(subgraph, sub_retweet, features, length=30, graph_file="graph.txt", diffusion_data_file="diffusion.pkl"):
     # save data to file
     node2id = dict([(node, vid) for vid, node in enumerate(subgraph.nodes())])
     print("remap node done")
 
-    graph_file = "graph.txt"
     f_graph = open(graph_file, 'w')
     f_graph.write("\n".join([str(node2id[v]) + " " + str(node2id[u]) for v, u in subgraph.edges()]))
     f_graph.close()
@@ -121,10 +150,19 @@ def save_data(subgraph, sub_retweet, length=30):
         for j, node in enumerate(retweet):
             diff_data[i, j] = node2id[node]
 
-    diffusion_data_file = "diffusion.pkl"
+    feature_matrix = np.zeros((len(node2id), len(features.values()[0])), dtype=np.float)
+    mean = np.asarray(features.values()).mean(axis=0)
+    for id, node in enumerate(subgraph.nodes()):
+        if node in features:
+            feature_matrix[id] = features[node]
+        else:
+            feature_matrix[id] = mean
+    feature_matrix = normalize(feature_matrix, norm="l2", axis=0)
+    print("feature write done with %d dimension" % (feature_matrix.shape[1]))
+
     diff_train = diff_data[:int(len(sub_retweet) * 0.8)]
     diff_test = diff_data[int(len(sub_retweet) * 0.8):]
-    data = {"train":diff_train, "test":diff_test}
+    data = {"train":diff_train, "test":diff_test, "feature":feature_matrix}
     with open(diffusion_data_file, 'w') as f:
         cp.dump(data, f)
     print("diffusion write done with %d diffusion path" % (len(sub_retweet)))
@@ -171,10 +209,12 @@ def test_next_batch(batch_size, input_size=181):
 
 
 def load_gcn_data(filename, num_support):
+    global all_data
     graph = nx.read_edgelist(filename, nodetype=int, create_using=nx.DiGraph())
     adj = nx.adjacency_matrix(graph)
     lap_list = chebyshev_polynomials(adj, k=num_support)
-    return lap_list
+    features = all_data["feature"]
+    return lap_list, features
 
 
 def feed_data(batch_size, input_step, input_size, is_train=True):
@@ -227,12 +267,76 @@ def chebyshev_polynomials(adj, k):
     return np.asarray(t_k)
 
 
+
+def parse_args():
+	parser = argparse.ArgumentParser(description="Run ComEmbed.")
+
+	parser.add_argument('-graph_file', nargs='?', default='graph.txt',
+						help='Graph path')
+	parser.add_argument('-data_file', nargs='?', default='diffusion.pkl',
+						help='Input diffusion data')
+	parser.add_argument('-g_input_step', type=int, default=15,
+						help='Length of diffusion instance for generator. Default is 15.')
+	parser.add_argument('-g_input_size', type=int, default=725,
+						help='Number of nodes. Default is 725.')
+	parser.add_argument('-g_hidden_size', type=int, default=64,
+						help='Number of neurons at hidden layer. Default is 64.')
+	parser.add_argument('-g_output_step', type=int, default=30,
+						help='Length of diffusion instance for generator. Default is 128.')
+	parser.add_argument('-g_batch_size', type=int, default=128,
+						help='Size of a minibatch sample. Default is 128.')
+
+	parser.add_argument('-d_input_step', type=int, default=30,
+						help='Length of diffusion instance for discriminator. Default is 30.')
+	parser.add_argument('-d_input_size', type=int, default=725,
+						help='Number of nodes. Default is 181.')
+	parser.add_argument('-d_hidden_size', type=int, default=10,
+						help='Number of neurons at hidden layer. Default is 64.')
+	parser.add_argument('-d_batch_size', type=int, default=128,
+						help='Size of a minibatch sample. Default is 128.')
+
+	parser.add_argument('-g_rate', type=float, default=2e-2,
+						help='Learning rate of SGD for generator. Default is 2e-2.')
+	parser.add_argument('-d_rate', type=float, default=2e-2,
+						help='Learning rate of SGD for discriminator. Default is 2e-2.')
+	parser.add_argument('-g_epochs', type=int, default=1,
+						help='Number of iteration for generator. Default is 1.')
+	parser.add_argument('-d_epochs', type=int, default=2,
+						help='Number of iteration for discriminator. Default is 2.')
+
+	parser.add_argument('-num_epochs', type=int, default=3000,
+						help='Number of iteration for gan. Default is 3000.')
+	parser.add_argument('-num_epochs_test', type=int, default=30,
+						help='Number of iteration for gan. Default is 30.')
+	parser.add_argument('-print_interval', type=int, default=100,
+						help='Interval of print information. Default is 100.')
+	parser.add_argument('-num_support', type=int, default=5,
+						help='Number of highest order laplacian matrix. Default is 5.')
+	parser.add_argument('-gcn', type=int, default=0,
+						help='Whether use GCN to train GAN model. Default is 0.')
+	parser.add_argument('-feature', type=int, default=0,
+						help='Whether use node attribute features in GCN to train GAN model. Default is 0.')
+	parser.add_argument('-wgan', type=int, default=0,
+						help='Whether use WGAN model. Default is 0.')
+	parser.add_argument('-w_clip', type=float, default=1e-2,
+						help='Clip parameter in WGAN model. Default is 1e-2.')
+	parser.add_argument('-attention', type=int, default=0,
+						help='Whether use attention to train GAN model. Default is 0.')
+	parser.add_argument('-baseline', type=int, default=0,
+						help='Whether train baseline model. Default is 0.')
+
+	return parser.parse_args()
+
+
 def main():
-    graph = read_network()
-    node2id = read_map()
-    m_info, m_retweet = read_diffusion(node2id)
+    max_node_num = 10000
+    args = parse_args()
+    graph = read_network(max_node_num)
+    node2id = read_map(max_node_num)
+    u_info = read_feature(node2id, max_node_num)
+    m_info, m_retweet = read_diffusion(node2id, max_node_num)
     sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet)
-    save_data(sub_graph, sub_retweet)
+    save_data(sub_graph, sub_retweet, u_info, args.graph_file, args.data_file)
 
 if __name__ == '__main__':
     sys.exit(main())

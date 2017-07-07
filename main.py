@@ -2,67 +2,16 @@
 __author__ = 'keven'
 
 import numpy as np
-import argparse
+import rnn
 import gan_rnn
 import gan_rnn_gcn
-import rnn
+import gan_rnn_gcn_feature
+import utils
 
 
-def parse_args():
-	parser = argparse.ArgumentParser(description="Run ComEmbed.")
-
-	parser.add_argument('-graph_file', nargs='?', default='graph.txt',
-						help='Graph path')
-	parser.add_argument('-data_file', nargs='?', default='diffusion1.pkl',
-						help='Input diffusion data')
-	parser.add_argument('-g_input_step', type=int, default=15,
-						help='Length of diffusion instance for generator. Default is 15.')
-	parser.add_argument('-g_input_size', type=int, default=725,
-						help='Number of nodes. Default is 725.')
-	parser.add_argument('-g_hidden_size', type=int, default=64,
-						help='Number of neurons at hidden layer. Default is 64.')
-	parser.add_argument('-g_output_step', type=int, default=30,
-						help='Length of diffusion instance for generator. Default is 128.')
-	parser.add_argument('-g_batch_size', type=int, default=128,
-						help='Size of a minibatch sample. Default is 128.')
-
-	parser.add_argument('-d_input_step', type=int, default=30,
-						help='Length of diffusion instance for discriminator. Default is 30.')
-	parser.add_argument('-d_input_size', type=int, default=725,
-						help='Number of nodes. Default is 181.')
-	parser.add_argument('-d_hidden_size', type=int, default=64,
-						help='Number of neurons at hidden layer. Default is 64.')
-	parser.add_argument('-d_batch_size', type=int, default=128,
-						help='Size of a minibatch sample. Default is 128.')
-
-	parser.add_argument('-g_rate', type=float, default=2e-2,
-						help='Learning rate of SGD for generator. Default is 2e-2.')
-	parser.add_argument('-d_rate', type=float, default=2e-2,
-						help='Learning rate of SGD for discriminator. Default is 2e-2.')
-	parser.add_argument('-g_epochs', type=int, default=1,
-						help='Number of iteration for generator. Default is 1.')
-	parser.add_argument('-d_epochs', type=int, default=2,
-						help='Number of iteration for discriminator. Default is 2.')
-
-	parser.add_argument('-num_epochs', type=int, default=3000,
-						help='Number of iteration for gan. Default is 3000.')
-	parser.add_argument('-num_epochs_test', type=int, default=30,
-						help='Number of iteration for gan. Default is 30.')
-	parser.add_argument('-print_interval', type=int, default=100,
-						help='Interval of print information. Default is 100.')
-	parser.add_argument('-num_support', type=int, default=5,
-						help='Number of highest order laplacian matrix. Default is 5.')
-	parser.add_argument('-gcn', type=int, default=0,
-						help='Whether use GCN to train GAN model. Default is 0.')
-	parser.add_argument('-attention', type=int, default=0,
-						help='Whether use attention to train GAN model. Default is 0.')
-	parser.add_argument('-baseline', type=int, default=0,
-						help='Whether train baseline model. Default is 0.')
-
-	return parser.parse_args()
 
 if __name__ == '__main__':
-    args = parse_args()
+    args = utils.parse_args()
     graph_file = args.graph_file
     data_file = args.data_file
 
@@ -90,11 +39,19 @@ if __name__ == '__main__':
     if args.gcn == 0:
         model = gan_rnn.GAN_RNN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate, g_epochs,
                             d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs, num_epochs,
-                            print_interval, num_epochs_test, args.attention, data_file)
+                            print_interval, num_epochs_test, args.attention, args.wgan, args.w_clip, data_file)
     else:
-        model = gan_rnn_gcn.GAN_RNN_GCN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate,
+        if args.feature == 0:
+            model = gan_rnn_gcn.GAN_RNN_GCN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate,
                                     g_epochs, d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs,
-                                    num_epochs, print_interval,num_epochs_test, args.attention, num_support, graph_file, data_file)
+                                    num_epochs, print_interval,num_epochs_test, args.attention, args.wgan, args.w_clip,
+                                            num_support, graph_file, data_file)
+        else:
+            model = gan_rnn_gcn_feature.GAN_RNN_GCN_Feature(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size,
+                                    g_rate, g_epochs, d_input_step, d_input_size, d_hidden_size, d_batch_size, d_rate, d_epochs,
+                                    num_epochs, print_interval,num_epochs_test, args.attention, args.wgan, args.w_clip,
+                                                            num_support, graph_file, data_file)
+
     if args.baseline == 1:
         model = rnn.RNN(g_input_step, g_input_size, g_hidden_size, g_output_step, g_batch_size, g_rate, num_epochs,
                         print_interval, num_epochs_test, args.attention, data_file)

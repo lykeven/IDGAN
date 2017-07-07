@@ -6,7 +6,7 @@ import tensorflow as tf
 import utils
 
 
-class GAN_RNN_GCN():
+class GAN_RNN_GCN_Feature():
     def __init__(self, g_input_step=14, g_input_size=28, g_hidden_size=50, g_output_step=28, g_batch_size=50, g_rate=2e-4,
                  g_epochs=1, d_input_step=28, d_input_size=28, d_hidden_size=50, d_batch_size=50, d_rate=2e-4, d_epochs=1,
                  num_epochs=100, print_interval=10, num_epochs_test=30, attention=0, wgan=0, w_clip=0, num_support=5,
@@ -81,18 +81,17 @@ class GAN_RNN_GCN():
         b_conv1 = tf.Variable(tf.constant(0.1, shape=[self.num_support]))
 
         input_t = tf.transpose(input, perm=[0, 2, 1])
-        input_m = tf.reshape(input_t, [batch_size * input_size, input_step])
+        input_m = tf.reshape(input_t, [batch_size * input_step, input_size])
         # convolve
         supports = []
         for i in range(self.num_support):
-            pre = tf.matmul(input_m, W_conv1[i])
-            pre_t = tf.transpose(tf.reshape(pre, [batch_size, input_size, num_feature]), perm=[1, 0, 2])
-            pre_m = tf.reshape(pre_t, [input_size, batch_size * num_feature])
-            support_t = tf.matmul(lap[i], pre_m) + b_conv1[i]
-            support_m = tf.transpose(tf.reshape(support_t, [input_size, batch_size, num_feature]), perm=[1, 2, 0])
+            pre = tf.matmul(self.fea, W_conv1[i])
+            support_m = tf.matmul(lap[i], pre) + b_conv1[i]
             supports.append(support_m)
-        output = tf.add_n(supports)
-        h_conv1 = tf.nn.relu(output)
+        support_sum = tf.add_n(supports)
+        h_conv1_temp = tf.matmul(input_m, support_sum)
+        h_conv1 = tf.reshape(h_conv1_temp, [batch_size, input_step, num_feature])
+        # h_conv1 = tf.nn.relu(output)
         return h_conv1
 
     def discriminator(self, input, input_step, input_size, hidden_size, output_size, batch_size, reuse=False):
@@ -100,7 +99,7 @@ class GAN_RNN_GCN():
             if reuse:
                 scope.reuse_variables()
 
-            gcn_output = self.graph_conv_network(input, self.lap, input_step, input_size, batch_size, input_step)
+            gcn_output = self.graph_conv_network(input, self.lap, input_step, input_size, batch_size, self.num_feature)
 
             # lstm cell and wrap with dropout
             d_lstm_cell = tf.contrib.rnn.BasicLSTMCell(hidden_size, forget_bias=0.0, state_is_tuple=True)
@@ -144,6 +143,7 @@ class GAN_RNN_GCN():
         self.z_t = tf.placeholder(tf.float32, [None, self.g_input_step, self.g_input_size])
         self.x_ = self.generator(self.z, self.g_input_step, self.g_input_size, self.g_hidden_size, self.g_batch_size)
         self.lap = tf.placeholder(tf.float32, [self.num_support, self.d_input_size, self.d_input_size])
+        self.fea = tf.placeholder(tf.float32, [self.d_input_size, self.num_feature])
 
 
         def compute_loss(x, y):
@@ -192,23 +192,22 @@ class GAN_RNN_GCN():
         for i in range(self.num_epochs):
             for j in range(self.d_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
-                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list}
+                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list, self.fea:self.feature}
                 if self.wgan == 1: sess.run(clip_updates, feed_dict=feed_dict)
                 sess.run(d_optim, feed_dict)
                 g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d for D, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy))
 
-
             for j in range(self.g_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
-                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list}
+                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list, self.fea:self.feature}
                 sess.run(g_optim, feed_dict)
                 g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d for G, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy))
 
             if i % self.print_interval == 0:
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
-                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list}
+                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list, self.fea:self.feature}
                 g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (i, g_loss, d_loss, accuracy))
 
@@ -216,7 +215,7 @@ class GAN_RNN_GCN():
         g_loss_list = d_loss_list = accuracy_list = [0.0] * self.num_epochs_test
         for i in range(self.num_epochs_test):
             batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size, is_train=False)
-            feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list}
+            feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list, self.fea:self.feature}
             z_ = sess.run(self.z_,feed_dict=feed_dict)
             g_loss_list[i], d_loss_list[i], accuracy_list[i] = sess.run([self.g_loss, self.d_loss, self.accuracy], feed_dict=feed_dict)
         print("Testing Loss: g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (sum(g_loss_list)/len(g_loss_list),

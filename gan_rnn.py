@@ -20,7 +20,7 @@ def bias_variable(shape):
 class GAN_RNN():
     def __init__(self, g_input_step=14, g_input_size=28, g_hidden_size=50, g_output_step=28, g_batch_size=50, g_rate=2e-4,
                  g_epochs=1, d_input_step=28, d_input_size=28, d_hidden_size=50, d_batch_size=50, d_rate=2e-4, d_epochs=1,
-                 num_epochs=100, print_interval=10, num_epochs_test=30, attention=0, data_file="diffusion.pkl"):
+                 num_epochs=100, print_interval=10, num_epochs_test=30, attention=0, wgan=0, w_clip=0, data_file="diffusion.pkl"):
         self.g_input_step = g_input_step
         self.g_input_size = g_input_size
         self.g_hidden_size = g_hidden_size
@@ -40,6 +40,8 @@ class GAN_RNN():
         self.print_interval = print_interval
         self.num_epochs_test = num_epochs_test
         self.attention = attention
+        self.w_clip = w_clip
+        self.wgan = wgan
         self.data_file = data_file
 
 
@@ -81,7 +83,7 @@ class GAN_RNN():
             x = tf.concat([input, self.z_], axis=1)
             return x
 
-    def discriminator(self, input, input_step, hidden_size, output_size, batch_size, reuse=False):
+    def discriminator(self, input, input_step, input_size, hidden_size, output_size, batch_size, reuse=False):
         with tf.variable_scope("discriminator") as scope:
             if reuse:
                 scope.reuse_variables()
@@ -120,36 +122,51 @@ class GAN_RNN():
             return d_y
 
     def build_model(self,):
+        utils.prepare_data(data_file=self.data_file)
         self.x = tf.placeholder(tf.float32, [None, self.d_input_step, self.d_input_size])
         self.z = tf.placeholder(tf.float32, [None, self.g_input_step, self.g_input_size])
         self.z_t = tf.placeholder(tf.float32, [None, self.g_input_step, self.g_input_size])
         self.x_ = self.generator(self.z, self.g_input_step, self.g_input_size, self.g_hidden_size, self.g_batch_size)
 
+
         def compute_loss(x, y):
             return tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=x, labels=y))
 
-        self.D = self.discriminator(self.x, self.d_input_step, self.d_hidden_size, 1, self.g_batch_size)
-        self.D_ = self.discriminator(self.x_, self.d_input_step, self.d_hidden_size, 1, self.g_batch_size, reuse=True)
-        self.d_loss_real = compute_loss(self.D, tf.ones_like(self.D))
-        self.d_loss_fake = compute_loss(self.D_, tf.zeros_like(self.D_))
-        self.g_loss = compute_loss(self.D_, tf.ones_like(self.D_))
-        self.d_loss = self.d_loss_real + self.d_loss_fake
+        self.D = self.discriminator(self.x, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size)
+        self.D_ = self.discriminator(self.x_, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size, reuse=True)
+
+        if self.wgan == 1:
+            self.d_loss_real = tf.reduce_mean(self.D)
+            self.d_loss_fake = tf.reduce_mean(self.D_)
+            self.g_loss = self.d_loss_fake
+            self.d_loss = self.d_loss_real - self.d_loss_fake
+
+        else:
+            self.d_loss_real = compute_loss(self.D, tf.ones_like(self.D))
+            self.d_loss_fake = compute_loss(self.D_, tf.zeros_like(self.D_))
+            self.g_loss = compute_loss(self.D_, tf.ones_like(self.D_))
+            self.d_loss = self.d_loss_real + self.d_loss_fake
+
 
         def compute_accuracy(x, y):
             # correct_pred = tf.equal(tf.argmax(x, 2), tf.argmax(y, 2))
             # return tf.reduce_mean(tf.cast(correct_pred, tf.float32))
             intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))
+            union = tf.sets.set_union(tf.argmax(x, 2), tf.argmax(y, 2))
             correct_number = tf.reduce_sum(tf.sets.set_size(intersection))
-            return tf.cast(correct_number, tf.float32) / self.d_input_step / self.d_batch_size
+            total_number = tf.reduce_sum(tf.sets.set_size(union))
+            # return tf.cast(correct_number, tf.float32) / self.d_input_step / self.d_batch_size
+            return tf.cast(correct_number, tf.float32) / tf.cast(total_number, tf.float32)
 
         self.accuracy = compute_accuracy(self.z_t, self.z_)
 
-
     def train(self,):
-        utils.prepare_data(data_file=self.data_file)
+        self.w_g = [w for w in tf.global_variables() if 'generator' in w.name]
+        self.w_d = [w for w in tf.global_variables() if 'discriminator' in w.name]
+        d_optim = tf.train.RMSPropOptimizer(self.d_rate).minimize(self.d_loss, var_list=self.w_d)
+        g_optim = tf.train.RMSPropOptimizer(self.g_rate).minimize(self.g_loss, var_list=self.w_g)
 
-        d_optim = tf.train.AdamOptimizer(self.d_rate).minimize(self.d_loss)
-        g_optim = tf.train.AdamOptimizer(self.g_rate).minimize(self.g_loss)
+        clip_updates = [w.assign(tf.clip_by_value(w, -self.w_clip, self.w_clip)) for w in self.w_d]
 
         init = tf.global_variables_initializer()
         sess = tf.InteractiveSession()
@@ -158,40 +175,33 @@ class GAN_RNN():
         for i in range(self.num_epochs):
             for j in range(self.d_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
-                g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z})
-                d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x})
-                sess.run(d_optim, feed_dict={self.z: batch_z, self.x: batch_x})
-                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+                if self.wgan == 1: sess.run(clip_updates, feed_dict=feed_dict)
+                sess.run(d_optim, feed_dict)
+                g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d for D, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy))
+
 
             for j in range(self.g_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
-                g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z})
-                d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x})
-                sess.run(g_optim, feed_dict={self.z: batch_z, self.x: batch_x})
-                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+                sess.run(g_optim, feed_dict)
+                g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d for G, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy))
 
             if i % self.print_interval == 0:
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
-                g_loss = sess.run(self.g_loss, feed_dict={self.z: batch_z})
-                d_loss = sess.run(self.d_loss, feed_dict={self.z: batch_z, self.x: batch_x})
-                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.x: batch_x, self.z_t: batch_z_})
+                feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+                g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (i, g_loss, d_loss, accuracy))
 
         # test performance
-        g_loss_list = []
-        d_loss_list = []
-        accuracy_list =[]
+        g_loss_list = d_loss_list = accuracy_list = [0.0] * self.num_epochs_test
         for i in range(self.num_epochs_test):
-            test_z, test_x, test_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size, is_train=False)
-            z_ = sess.run(self.z_,feed_dict={self.z: test_z})
-            g_loss = sess.run(self.g_loss, feed_dict={self.z: test_z})
-            d_loss = sess.run(self.d_loss, feed_dict={self.z: test_z, self.x: test_x})
-            accuracy = sess.run(self.accuracy, feed_dict={self.z: test_z, self.x: test_x, self.z_t:test_z_})
-            g_loss_list.append(g_loss)
-            d_loss_list.append(d_loss)
-            accuracy_list.append(accuracy)
+            batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size, is_train=False)
+            feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+            z_ = sess.run(self.z_,feed_dict=feed_dict)
+            g_loss_list[i], d_loss_list[i], accuracy_list[i] = sess.run([self.g_loss, self.d_loss, self.accuracy], feed_dict=feed_dict)
         print("Testing Loss: g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (sum(g_loss_list)/len(g_loss_list),
                 sum(d_loss_list)/len(d_loss_list) , sum(accuracy_list)/ len(accuracy_list)))
 

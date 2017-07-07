@@ -102,19 +102,14 @@ class RNN():
             z_ = sess.run(self.z_,feed_dict={self.z: batch_z})
             sess.run(optim, feed_dict={self.z: batch_z, self.z_t: batch_z_})
             if i % self.print_interval == 0:
-                cost = sess.run(self.loss, feed_dict={self.z: batch_z, self.z_t: batch_z_})
-                accuracy = sess.run(self.accuracy, feed_dict={self.z: batch_z, self.z_t: batch_z_})
+                cost, accuracy = sess.run([self.loss,self.accuracy] , feed_dict={self.z: batch_z, self.z_t: batch_z_})
                 print("Iter %d, loss = %.5f, accuracy = %.5f" % (i, cost, accuracy))
 
         # test performance
-        loss_list = []
-        accuracy_list =[]
+        loss_list = accuracy_list = [0.0] * self.num_epochs_test
         for i in range(self.num_epochs_test):
             test_z, test_x, test_z_ = utils.feed_data(self.batch_size, self.input_step, self.input_size, is_train=False)
-            cost = sess.run(self.loss, feed_dict={self.z: test_z, self.z_t:test_z_})
-            accuracy = sess.run(self.accuracy, feed_dict={self.z: test_z, self.z_t:test_z_})
-            loss_list.append(cost)
-            accuracy_list.append(accuracy)
+            loss_list[i], accuracy_list[i] = sess.run([self.loss, self.accuracy], feed_dict={self.z: test_z, self.z_t:test_z_})
         print("Testing Loss: loss = %.5f, accuracy = %.5f" % (sum(loss_list)/len(loss_list), sum(accuracy_list)/ len(accuracy_list)))
 
 
