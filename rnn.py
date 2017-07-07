@@ -101,7 +101,7 @@ class RNN():
             batch_z, batch_x, batch_z_ = utils.feed_data(self.batch_size, self.input_step, self.input_size)
             z_ = sess.run(self.z_,feed_dict={self.z: batch_z})
             sess.run(optim, feed_dict={self.z: batch_z, self.z_t: batch_z_})
-            if i % self.print_interval == 0:
+            if i % 10 == 0:
                 cost, accuracy = sess.run([self.loss,self.accuracy] , feed_dict={self.z: batch_z, self.z_t: batch_z_})
                 print("Iter %d, loss = %.5f, accuracy = %.5f" % (i, cost, accuracy))
 
