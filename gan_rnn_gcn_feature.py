@@ -39,6 +39,9 @@ class GAN_RNN_GCN_Feature():
 
     def generator(self, input, input_step, input_size, hidden_size, batch_size, reuse=False):
         with tf.variable_scope("generator") as scope:
+
+            lstm_input = self.graph_conv_network(input, self.lap, input_step, input_size, batch_size, self.num_feature)
+
             # lstm cell and wrap with dropout
             g_lstm_cell = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
             g_lstm_cell_1 = tf.contrib.rnn.BasicLSTMCell(input_size, forget_bias=0.0, state_is_tuple=True)
@@ -63,7 +66,7 @@ class GAN_RNN_GCN_Feature():
             g_state = g_state_
             for i in range(input_step):
                 if i > 0: tf.get_variable_scope().reuse_variables()
-                (g_cell_output, g_state) = g_cell(input[:, i, :], g_state)  # cell_out: [batch_size, hidden_size]
+                (g_cell_output, g_state) = g_cell(lstm_input[:, i, :], g_state)  # cell_out: [batch_size, hidden_size]
                 g_outputs.append(g_cell_output)  # output: shape[input_step][batch_size, hidden_size]
 
             # expend outputs to [batch_size, hidden_size * input_step] and then reshape to [batch_size * input_steps, hidden_size]
@@ -141,16 +144,26 @@ class GAN_RNN_GCN_Feature():
         self.x = tf.placeholder(tf.float32, [None, self.d_input_step, self.d_input_size])
         self.z = tf.placeholder(tf.float32, [None, self.g_input_step, self.g_input_size])
         self.z_t = tf.placeholder(tf.float32, [None, self.g_input_step, self.g_input_size])
-        self.x_ = self.generator(self.z, self.g_input_step, self.g_input_size, self.g_hidden_size, self.g_batch_size)
         self.lap = tf.placeholder(tf.float32, [self.num_support, self.d_input_size, self.d_input_size])
         self.fea = tf.placeholder(tf.float32, [self.d_input_size, self.num_feature])
+
+        self.x_ = self.generator(self.z, self.g_input_step, self.g_input_size, self.g_hidden_size, self.g_batch_size)
+        self.D = self.discriminator(self.x, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size)
+        self.D_ = self.discriminator(self.x_, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size, reuse=True)
 
 
         def compute_loss(x, y):
             return tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=x, labels=y))
 
-        self.D = self.discriminator(self.x, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size)
-        self.D_ = self.discriminator(self.x_, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size, reuse=True)
+        def compute_accuracy(x, y):
+            # correct_pred = tf.equal(tf.argmax(x, 2), tf.argmax(y, 2))
+            # return tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+            intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))
+            union = tf.sets.set_union(tf.argmax(x, 2), tf.argmax(y, 2))
+            correct_number = tf.reduce_sum(tf.sets.set_size(intersection))
+            total_number = tf.reduce_sum(tf.sets.set_size(union))
+            # return tf.cast(correct_number, tf.float32) / self.d_input_step / self.d_batch_size
+            return tf.cast(correct_number, tf.float32) / tf.cast(total_number, tf.float32)
 
         if self.wgan == 1:
             self.d_loss_real = tf.reduce_mean(self.D)
@@ -163,17 +176,6 @@ class GAN_RNN_GCN_Feature():
             self.d_loss_fake = compute_loss(self.D_, tf.zeros_like(self.D_))
             self.g_loss = compute_loss(self.D_, tf.ones_like(self.D_))
             self.d_loss = self.d_loss_real + self.d_loss_fake
-
-
-        def compute_accuracy(x, y):
-            # correct_pred = tf.equal(tf.argmax(x, 2), tf.argmax(y, 2))
-            # return tf.reduce_mean(tf.cast(correct_pred, tf.float32))
-            intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))
-            union = tf.sets.set_union(tf.argmax(x, 2), tf.argmax(y, 2))
-            correct_number = tf.reduce_sum(tf.sets.set_size(intersection))
-            total_number = tf.reduce_sum(tf.sets.set_size(union))
-            # return tf.cast(correct_number, tf.float32) / self.d_input_step / self.d_batch_size
-            return tf.cast(correct_number, tf.float32) / tf.cast(total_number, tf.float32)
 
         self.accuracy = compute_accuracy(self.z_t, self.z_)
 

@@ -7,6 +7,7 @@ import networkx as nx
 import pickle as cp
 import scipy.sparse as sp
 import tensorflow as tf
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import normalize
 from scipy.sparse.linalg.eigen.arpack import eigsh
 import argparse
@@ -71,34 +72,35 @@ def read_feature(node2id, max_node_num=10000):
     return info_dict
 
 
-def read_diffusion(node2id, max_node_num=10000):
+def read_diffusion(node2id, max_node_num=10000, min_length=10):
     m_info_dict = dict()
     m_retweet_dict = dict()
     diffusion_file = "total.txt"
     f = open(diffusion_file)
     iter = 0
+    cnt = 0
     while 1:
         line = f.readline()
         if not line:
             break
         m_id, m_time, u_id, retweet_num = line.strip().split(" ")
         id_time_temp = f.readline().strip().split(" ")
+        if len(id_time_temp) >min_length: cnt += 1
         id_time_list = [[id_time_temp[2 * i], id_time_temp[2 * i + 1]] for i in range(len(id_time_temp) / 2)
                         if id_time_temp[2 * i] in node2id and node2id[id_time_temp[2 * i]]<max_node_num]
-        if len(id_time_list) > 0:
+        if len(id_time_list) > min_length:
             m_info_dict[m_id] = [m_time, u_id, int(retweet_num)]
             m_retweet_dict[m_id] = id_time_list
         iter += 1
         if iter % 10000 ==0:
             print ("%dth diffusion" % (iter,))
     f.close()
-    print("diffusion read done")
+    print("diffusion read done with %d candidate diffusion" % (cnt))
     return m_info_dict, m_retweet_dict
 
 
-def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30):
+def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30, single=False):
     # extract a dense sub graph
-    sub_retweet = []
     user_retweet = [[]] * len(node2id)
     for m_id, info in m_info.items():
         if info[2] > length:
@@ -106,36 +108,68 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
                 user_retweet[node2id[user]].append([m_id, time])
     print("user retweet collect done")
 
+    selected_node_dict = dict()
     degree_dict = graph.in_degree()
     ordered_degree = sorted(degree_dict.items(), key=lambda a: a[1], reverse=True)
-    selected_node_list = [node[0] for node in ordered_degree[:num_node]]
-    selected_node_dict = dict(zip(selected_node_list, [False] * len(selected_node_list)))
-    for node in selected_node_list:
-        for v, u in graph.out_edges(node):
-            selected_node_dict[v] = True
+    if single is False:
+        selected_node_list = [node[0] for node in ordered_degree[:num_node]]
+        selected_node_dict = dict(zip(selected_node_list, [False] * len(selected_node_list)))
+        for node in selected_node_list:
+            for v, u in graph.out_edges(node):
+                selected_node_dict[v] = True
+                selected_node_dict[u] = True
+    else:
+        init_node = ordered_degree[0][0]
+        selected_node_dict[init_node] = True
+        for v, u in graph.out_edges(init_node):
             selected_node_dict[u] = True
+        for node, _ in selected_node_dict.items():
+            for v, u in graph.out_edges(node):
+                selected_node_dict[u] = True
 
-    retweet_dict = dict()
     sub_graph = graph.subgraph([key for key, value in selected_node_dict.items() if value==True])
     print("subgraph extract done")
 
+    retweet_dict = dict()
     for node in sub_graph.nodes():
         for m_id, time in user_retweet[node]:
             if m_id not in retweet_dict:
                 retweet_dict[m_id] = [[node, time]]
             else:
                 retweet_dict[m_id].append([node, time])
-
     print("message select done")
+
+    sub_retweet = []
     for m_id, retweet_info in retweet_dict.items():
-        while len(retweet_info) >= length:
-            diff_node_list = sorted(retweet_info[:length], key= lambda a: a[1], reverse=False)
-            sub_retweet.append([a[0] for a in diff_node_list])
-            retweet_info = retweet_info[length:]
+        if len(retweet_info) >= length:
+            diff_node_list = sorted(retweet_info, key= lambda a: a[1], reverse=False)
+            start_node = diff_node_list[0][0]
+            diffusion_set = [start_node]
+            start_neibor = dict()
+            for v, u in graph.out_edges(start_node):
+                start_neibor[u] = True
+            for i in range(1, len(diff_node_list)):
+                if diff_node_list[i][0] in start_neibor:
+                    diffusion_set.append(diff_node_list[i][0])
+                    for v, u in graph.out_edges(diff_node_list[i][0]):
+                        start_neibor[u] = True
+                if len(diffusion_set) == length: break
+            if len(diffusion_set) == length:
+                sub_retweet.append(diffusion_set)
+    print("select %d retweet message" % (len(sub_retweet)))
     return sub_graph, sub_retweet
 
 
-def save_data(subgraph, sub_retweet, features, length=30, graph_file="graph.txt", diffusion_data_file="diffusion.pkl"):
+def show_graph(graph_file):
+    graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
+    pos = nx.spring_layout(graph)
+    nx.draw_networkx_nodes(graph, pos, node_shape='.', node_size=20)
+    nx.draw_networkx_edges(graph, pos)
+    nx.draw_networkx_labels(graph, pos)
+    plt.show()
+
+
+def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion_data_file="diffusion.pkl", length=30):
     # save data to file
     node2id = dict([(node, vid) for vid, node in enumerate(subgraph.nodes())])
     print("remap node done")
@@ -167,6 +201,7 @@ def save_data(subgraph, sub_retweet, features, length=30, graph_file="graph.txt"
         cp.dump(data, f)
     print("diffusion write done with %d diffusion path" % (len(sub_retweet)))
 
+    show_graph(graph_file)
     prepare_data()
     batch_data = train_next_batch(batch_size=128, input_size=subgraph.number_of_nodes())
 
@@ -271,9 +306,9 @@ def chebyshev_polynomials(adj, k):
 def parse_args():
 	parser = argparse.ArgumentParser(description="Run ComEmbed.")
 
-	parser.add_argument('-graph_file', nargs='?', default='graph.txt',
+	parser.add_argument('-graph_file', nargs='?', default='graph2.txt',
 						help='Graph path')
-	parser.add_argument('-data_file', nargs='?', default='diffusion.pkl',
+	parser.add_argument('-data_file', nargs='?', default='diffusion2.pkl',
 						help='Input diffusion data')
 	parser.add_argument('-g_input_step', type=int, default=15,
 						help='Length of diffusion instance for generator. Default is 15.')
@@ -330,12 +365,14 @@ def parse_args():
 
 def main():
     max_node_num = 10000
+    num_node = 100
+    min_length = 50
     args = parse_args()
     graph = read_network(max_node_num)
     node2id = read_map(max_node_num)
     u_info = read_feature(node2id, max_node_num)
-    m_info, m_retweet = read_diffusion(node2id, max_node_num)
-    sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet)
+    m_info, m_retweet = read_diffusion(node2id, max_node_num, min_length)
+    sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet, num_node, min_length, False)
     save_data(sub_graph, sub_retweet, u_info, args.graph_file, args.data_file)
 
 if __name__ == '__main__':
