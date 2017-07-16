@@ -10,7 +10,7 @@ class GAN_RNN_GCN_Feature():
     def __init__(self, g_input_step=14, g_input_size=28, g_hidden_size=50, g_output_step=28, g_batch_size=50, g_rate=2e-4,
                  g_epochs=1, d_input_step=28, d_input_size=28, d_hidden_size=50, d_batch_size=50, d_rate=2e-4, d_epochs=1,
                  num_epochs=100, print_interval=10, num_epochs_test=30, attention=0, wgan=0, w_clip=0, num_support=5,
-                 graph_file="graph.txt", data_file="diffusion.pkl"):
+                 gumbel_softmax=0, graph_file="graph.txt", data_file="diffusion.pkl"):
         self.g_input_step = g_input_step
         self.g_input_size = g_input_size
         self.g_hidden_size = g_hidden_size
@@ -33,6 +33,7 @@ class GAN_RNN_GCN_Feature():
         self.wgan = wgan
         self.w_clip = w_clip
         self.num_support = num_support
+        self.gumbel = gumbel_softmax
         self.graph_file = graph_file
         self.data_file = data_file
 

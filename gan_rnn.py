@@ -20,7 +20,8 @@ def bias_variable(shape):
 class GAN_RNN():
     def __init__(self, g_input_step=14, g_input_size=28, g_hidden_size=50, g_output_step=28, g_batch_size=50, g_rate=2e-4,
                  g_epochs=1, d_input_step=28, d_input_size=28, d_hidden_size=50, d_batch_size=50, d_rate=2e-4, d_epochs=1,
-                 num_epochs=100, print_interval=10, num_epochs_test=30, attention=0, wgan=0, w_clip=0, data_file="diffusion.pkl"):
+                 num_epochs=100, print_interval=10, num_epochs_test=30, attention=0, wgan=0, w_clip=0, gumbel_softmax =0,
+                 data_file="diffusion.pkl"):
         self.g_input_step = g_input_step
         self.g_input_size = g_input_size
         self.g_hidden_size = g_hidden_size
@@ -42,6 +43,7 @@ class GAN_RNN():
         self.attention = attention
         self.w_clip = w_clip
         self.wgan = wgan
+        self.gumbel = gumbel_softmax
         self.data_file = data_file
 
 
@@ -74,10 +76,13 @@ class GAN_RNN():
                 (g_cell_output, g_state) = g_cell(input[:, i, :], g_state)  # cell_out: [batch_size, hidden_size]
                 g_outputs.append(g_cell_output)  # output: shape[input_step][batch_size, hidden_size]
 
-            # expend outputs to [batch_size, hidden_size * input_step] and then reshape to [batch_size * input_steps, hidden_size]
-            g_output = tf.reshape(tf.concat(g_outputs, axis=1), [-1, input_size])
-            g_y_soft = tf.nn.softmax(g_output)
-            self.z_ = tf.reshape(g_y_soft, [batch_size, input_step, input_size])
+            if self.gumbel == 0:
+                g_output = tf.reshape(tf.concat(g_outputs, axis=1), [-1, input_size])
+                g_y_soft = tf.nn.softmax(g_output)
+                self.z_ = tf.reshape(g_y_soft, [batch_size, input_step, input_size])
+            else:
+                g_output = tf.reshape(tf.concat(g_outputs, axis=1), [batch_size, input_step, input_size])
+                self.z_ = utils.gumbel_softmax(g_output, self.temperature, hard=True)
 
             # concentrate input and output of rnn
             x = tf.concat([input, self.z_], axis=1)
@@ -126,14 +131,25 @@ class GAN_RNN():
         self.x = tf.placeholder(tf.float32, [None, self.d_input_step, self.d_input_size])
         self.z = tf.placeholder(tf.float32, [None, self.g_input_step, self.g_input_size])
         self.z_t = tf.placeholder(tf.float32, [None, self.g_input_step, self.g_input_size])
-        self.x_ = self.generator(self.z, self.g_input_step, self.g_input_size, self.g_hidden_size, self.g_batch_size)
 
+        if self.gumbel == 1: self.temperature = tf.placeholder(tf.float32, [1])
+
+        self.x_ = self.generator(self.z, self.g_input_step, self.g_input_size, self.g_hidden_size, self.g_batch_size)
+        self.D = self.discriminator(self.x, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size)
+        self.D_ = self.discriminator(self.x_, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size, reuse=True)
 
         def compute_loss(x, y):
             return tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=x, labels=y))
 
-        self.D = self.discriminator(self.x, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size)
-        self.D_ = self.discriminator(self.x_, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size, reuse=True)
+        def compute_accuracy(x, y):
+            # correct_pred = tf.equal(tf.argmax(x, 2), tf.argmax(y, 2))
+            # return tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+            intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))
+            union = tf.sets.set_union(tf.argmax(x, 2), tf.argmax(y, 2))
+            correct_number = tf.reduce_sum(tf.sets.set_size(intersection))
+            total_number = tf.reduce_sum(tf.sets.set_size(union))
+            # return tf.cast(correct_number, tf.float32) / self.d_input_step / self.d_batch_size
+            return tf.cast(correct_number, tf.float32) / tf.cast(total_number, tf.float32)
 
         if self.wgan == 1:
             self.d_loss_real = tf.reduce_mean(self.D)
@@ -146,17 +162,6 @@ class GAN_RNN():
             self.d_loss_fake = compute_loss(self.D_, tf.zeros_like(self.D_))
             self.g_loss = compute_loss(self.D_, tf.ones_like(self.D_))
             self.d_loss = self.d_loss_real + self.d_loss_fake
-
-
-        def compute_accuracy(x, y):
-            # correct_pred = tf.equal(tf.argmax(x, 2), tf.argmax(y, 2))
-            # return tf.reduce_mean(tf.cast(correct_pred, tf.float32))
-            intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))
-            union = tf.sets.set_union(tf.argmax(x, 2), tf.argmax(y, 2))
-            correct_number = tf.reduce_sum(tf.sets.set_size(intersection))
-            total_number = tf.reduce_sum(tf.sets.set_size(union))
-            # return tf.cast(correct_number, tf.float32) / self.d_input_step / self.d_batch_size
-            return tf.cast(correct_number, tf.float32) / tf.cast(total_number, tf.float32)
 
         self.accuracy = compute_accuracy(self.z_t, self.z_)
 
@@ -176,6 +181,7 @@ class GAN_RNN():
             for j in range(self.d_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+                if self.gumbel == 1: feed_dict[self.temperature] = [utils.compute_temperature(i)]
                 if self.wgan == 1: sess.run(clip_updates, feed_dict=feed_dict)
                 sess.run(d_optim, feed_dict)
                 g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
@@ -185,6 +191,7 @@ class GAN_RNN():
             for j in range(self.g_epochs):
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+                if self.gumbel == 1: feed_dict[self.temperature] = [utils.compute_temperature(i)]
                 sess.run(g_optim, feed_dict)
                 g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d for G, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (j, g_loss, d_loss, accuracy))
@@ -192,6 +199,7 @@ class GAN_RNN():
             if i % self.print_interval == 0:
                 batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size)
                 feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+                if self.gumbel == 1: feed_dict[self.temperature] = [utils.compute_temperature(i)]
                 g_loss, d_loss, accuracy = sess.run([self.g_loss,self.d_loss,self.accuracy], feed_dict=feed_dict)
                 print("Iter %d, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (i, g_loss, d_loss, accuracy))
 
@@ -200,6 +208,7 @@ class GAN_RNN():
         for i in range(self.num_epochs_test):
             batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size, is_train=False)
             feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_}
+            if self.gumbel == 1: feed_dict[self.temperature] = [utils.compute_temperature(i)]
             z_ = sess.run(self.z_,feed_dict=feed_dict)
             g_loss_list[i], d_loss_list[i], accuracy_list[i] = sess.run([self.g_loss, self.d_loss, self.accuracy], feed_dict=feed_dict)
         print("Testing Loss: g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (sum(g_loss_list)/len(g_loss_list),

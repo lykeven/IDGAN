@@ -327,6 +327,10 @@ def gumbel_softmax(logits, temperature, eps=1e-20, hard=False):
   return y
 
 
+def compute_temperature(epochs=0, init_t=5.0, min_t=1.0, rate=3e-3):
+    return np.maximum(init_t * np.exp(-rate * epochs), min_t)
+
+
 def parse_args():
 	parser = argparse.ArgumentParser(description="Run ComEmbed.")
 
@@ -381,6 +385,8 @@ def parse_args():
 						help='Clip parameter in WGAN model. Default is 1e-2.')
 	parser.add_argument('-attention', type=int, default=0,
 						help='Whether use attention to train GAN model. Default is 0.')
+	parser.add_argument('-gumbel', type=int, default=0,
+						help='Whether use gumbel softmax distribution to train GAN model. Default is 0.')
 	parser.add_argument('-baseline', type=int, default=0,
 						help='Whether train baseline model. Default is 0.')
 
