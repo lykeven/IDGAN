@@ -72,7 +72,7 @@ def read_feature(node2id, max_node_num=10000):
     return info_dict
 
 
-def read_diffusion(node2id, max_node_num=10000, min_length=10):
+def read_diffusion(max_node_num=10000, min_length=10):
     m_info_dict = dict()
     m_retweet_dict = dict()
     diffusion_file = "total.txt"
@@ -86,8 +86,8 @@ def read_diffusion(node2id, max_node_num=10000, min_length=10):
         m_id, m_time, u_id, retweet_num = line.strip().split(" ")
         id_time_temp = f.readline().strip().split(" ")
         if len(id_time_temp) >min_length: cnt += 1
-        id_time_list = [[id_time_temp[2 * i], id_time_temp[2 * i + 1]] for i in range(len(id_time_temp) / 2)
-                        if id_time_temp[2 * i] in node2id and node2id[id_time_temp[2 * i]]<max_node_num]
+        id_time_list = [[int(id_time_temp[2 * i]), id_time_temp[2 * i + 1]] for i in range(len(id_time_temp) / 2)
+                        if int(id_time_temp[2 * i])< max_node_num]
         if len(id_time_list) > min_length:
             m_info_dict[m_id] = [m_time, u_id, int(retweet_num)]
             m_retweet_dict[m_id] = id_time_list
@@ -95,19 +95,12 @@ def read_diffusion(node2id, max_node_num=10000, min_length=10):
         if iter % 10000 ==0:
             print ("%dth diffusion" % (iter,))
     f.close()
-    print("diffusion read done with %d candidate diffusion" % (cnt))
+    print("diffusion read done with %d diffusion have length more than %d, and get %d candidate diffusion" % (cnt, min_length, len(m_retweet_dict)))
     return m_info_dict, m_retweet_dict
 
 
-def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30, single=False):
+def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30, single=False, ego=False):
     # extract a dense sub graph
-    user_retweet = [[]] * len(node2id)
-    for m_id, info in m_info.items():
-        if info[2] > length:
-            for user, time in m_retweet[m_id]:
-                user_retweet[node2id[user]].append([m_id, time])
-    print("user retweet collect done")
-
     selected_node_dict = dict()
     degree_dict = graph.in_degree()
     ordered_degree = sorted(degree_dict.items(), key=lambda a: a[1], reverse=True)
@@ -130,32 +123,38 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
     sub_graph = graph.subgraph([key for key, value in selected_node_dict.items() if value==True])
     print("subgraph extract done")
 
+
     retweet_dict = dict()
-    for node in sub_graph.nodes():
-        for m_id, time in user_retweet[node]:
-            if m_id not in retweet_dict:
-                retweet_dict[m_id] = [[node, time]]
-            else:
-                retweet_dict[m_id].append([node, time])
-    print("message select done")
+    for m_id, retweet_info in m_retweet.items():
+        id_time_list = [[id, time] for id, time in retweet_info if id in selected_node_dict]
+        if len(id_time_list) >= length:
+            retweet_dict[m_id] = id_time_list
+    print("retweet extract within subgraph with %d diffusion whose length over than %d"% (len(retweet_dict), length))
 
     sub_retweet = []
-    for m_id, retweet_info in retweet_dict.items():
-        if len(retweet_info) >= length:
-            diff_node_list = sorted(retweet_info, key= lambda a: a[1], reverse=False)
-            start_node = diff_node_list[0][0]
-            diffusion_set = [start_node]
-            start_neibor = dict()
-            for v, u in graph.out_edges(start_node):
-                start_neibor[u] = True
-            for i in range(1, len(diff_node_list)):
-                if diff_node_list[i][0] in start_neibor:
-                    diffusion_set.append(diff_node_list[i][0])
-                    for v, u in graph.out_edges(diff_node_list[i][0]):
-                        start_neibor[u] = True
-                if len(diffusion_set) == length: break
-            if len(diffusion_set) == length:
-                sub_retweet.append(diffusion_set)
+    if ego is True:
+        for m_id, retweet_info in retweet_dict.items():
+            diff_node_list = retweet_info
+            for j in range(len(diff_node_list) - length):
+                start_node = diff_node_list[j][0]
+                diffusion_set = [start_node]
+                start_neibor = dict()
+                for v, u in graph.out_edges(start_node):
+                    start_neibor[u] = True
+                for i in range(j+1, len(diff_node_list)):
+                    if diff_node_list[i][0] in start_neibor:
+                        diffusion_set.append(diff_node_list[i][0])
+                        for v, u in graph.out_edges(diff_node_list[i][0]):
+                            start_neibor[u] = True
+                    if len(diffusion_set) == length: break
+                if len(diffusion_set) == length:
+                    sub_retweet.append(diffusion_set)
+
+    else:
+        for m_id, retweet_info in retweet_dict.items():
+            while len(retweet_info) >= length:
+                sub_retweet.append([a[0] for a in retweet_info[:length]])
+                retweet_info = retweet_info[length:]
     print("select %d retweet message" % (len(sub_retweet)))
     return sub_graph, sub_retweet
 
@@ -179,10 +178,6 @@ def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion
     f_graph.close()
     print("graph write done with %d nodes and %d edges" % (subgraph.number_of_nodes(), subgraph.number_of_edges()))
 
-    diff_data = np.zeros((len(sub_retweet), length), dtype=np.int)
-    for i, retweet in enumerate(sub_retweet):
-        for j, node in enumerate(retweet):
-            diff_data[i, j] = node2id[node]
 
     feature_matrix = np.zeros((len(node2id), len(features.values()[0])), dtype=np.float)
     mean = np.asarray(features.values()).mean(axis=0)
@@ -194,6 +189,12 @@ def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion
     feature_matrix = normalize(feature_matrix, norm="l2", axis=0)
     print("feature write done with %d dimension" % (feature_matrix.shape[1]))
 
+
+    diff_data = np.zeros((len(sub_retweet), length), dtype=np.int)
+    for i, retweet in enumerate(sub_retweet):
+        for j, node in enumerate(retweet):
+            diff_data[i, j] = node2id[node]
+
     diff_train = diff_data[:int(len(sub_retweet) * 0.8)]
     diff_test = diff_data[int(len(sub_retweet) * 0.8):]
     data = {"train":diff_train, "test":diff_test, "feature":feature_matrix}
@@ -201,10 +202,21 @@ def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion
         cp.dump(data, f)
     print("diffusion write done with %d diffusion path" % (len(sub_retweet)))
 
-    show_graph(graph_file)
-    prepare_data()
-    batch_data = train_next_batch(batch_size=128, input_size=subgraph.number_of_nodes())
 
+def preprocess_data(args):
+    max_node_num = 100000
+    num_node = 100
+    min_length = 10
+    node2id = read_map(max_node_num)
+    graph = read_network(max_node_num)
+    m_info, m_retweet = read_diffusion(max_node_num, min_length)
+    u_info = read_feature(node2id, max_node_num)
+    sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet, num_node, min_length, single=False, ego=True)
+    save_data(sub_graph, sub_retweet, u_info, args.graph_file, args.data_file, min_length)
+
+    # show_graph(graph_file)
+    prepare_data()
+    batch_data = train_next_batch(batch_size=128, input_size=sub_graph.number_of_nodes())
 
 
 train_pos = 0
@@ -302,6 +314,18 @@ def chebyshev_polynomials(adj, k):
     return np.asarray(t_k)
 
 
+def gumbel_softmax(logits, temperature, eps=1e-20, hard=False):
+  # Draw a sample from the Gumbel softmax distribution
+  U = tf.random_uniform(tf.shape(logits), minval=0, maxval=1)
+  temp = logits -tf.log(-tf.log(U + eps) + eps)
+  y = tf.nn.softmax( temp / temperature)
+  if hard:
+    # k = tf.shape(logits)[-1]
+    # y_hard = tf.cast(tf.one_hot(tf.argmax(y,1),k), y.dtype)
+    y_hard = tf.cast(tf.equal(y, tf.reduce_max(y, 1, keep_dims=True)), y.dtype)
+    y = tf.stop_gradient(y_hard - y) + y
+  return y
+
 
 def parse_args():
 	parser = argparse.ArgumentParser(description="Run ComEmbed.")
@@ -310,20 +334,20 @@ def parse_args():
 						help='Graph path')
 	parser.add_argument('-data_file', nargs='?', default='diffusion2.pkl',
 						help='Input diffusion data')
-	parser.add_argument('-g_input_step', type=int, default=15,
+	parser.add_argument('-g_input_step', type=int, default=5,
 						help='Length of diffusion instance for generator. Default is 15.')
-	parser.add_argument('-g_input_size', type=int, default=725,
+	parser.add_argument('-g_input_size', type=int, default=3744,
 						help='Number of nodes. Default is 725.')
 	parser.add_argument('-g_hidden_size', type=int, default=64,
 						help='Number of neurons at hidden layer. Default is 64.')
-	parser.add_argument('-g_output_step', type=int, default=30,
+	parser.add_argument('-g_output_step', type=int, default=10,
 						help='Length of diffusion instance for generator. Default is 128.')
 	parser.add_argument('-g_batch_size', type=int, default=128,
 						help='Size of a minibatch sample. Default is 128.')
 
-	parser.add_argument('-d_input_step', type=int, default=30,
+	parser.add_argument('-d_input_step', type=int, default=10,
 						help='Length of diffusion instance for discriminator. Default is 30.')
-	parser.add_argument('-d_input_size', type=int, default=725,
+	parser.add_argument('-d_input_size', type=int, default=3744,
 						help='Number of nodes. Default is 181.')
 	parser.add_argument('-d_hidden_size', type=int, default=10,
 						help='Number of neurons at hidden layer. Default is 64.')
@@ -364,16 +388,8 @@ def parse_args():
 
 
 def main():
-    max_node_num = 10000
-    num_node = 100
-    min_length = 50
     args = parse_args()
-    graph = read_network(max_node_num)
-    node2id = read_map(max_node_num)
-    u_info = read_feature(node2id, max_node_num)
-    m_info, m_retweet = read_diffusion(node2id, max_node_num, min_length)
-    sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet, num_node, min_length, False)
-    save_data(sub_graph, sub_retweet, u_info, args.graph_file, args.data_file)
+    preprocess_data(args)
 
 if __name__ == '__main__':
     sys.exit(main())
