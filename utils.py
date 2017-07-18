@@ -100,7 +100,7 @@ def read_diffusion(max_node_num=10000, min_length=10):
 
 
 def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30, single=False, ego=False):
-    # extract a dense sub graph
+    # extract a dense sub graph according to several max-degree node or 3-ego network of one node
     selected_node_dict = dict()
     degree_dict = graph.in_degree()
     ordered_degree = sorted(degree_dict.items(), key=lambda a: a[1], reverse=True)
@@ -123,7 +123,7 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
     sub_graph = graph.subgraph([key for key, value in selected_node_dict.items() if value==True])
     print("subgraph extract done")
 
-
+    # obtain candidate diffusion based on the subgraph
     retweet_dict = dict()
     for m_id, retweet_info in m_retweet.items():
         id_time_list = [[id, time] for id, time in retweet_info if id in selected_node_dict]
@@ -131,6 +131,7 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
             retweet_dict[m_id] = id_time_list
     print("retweet extract within subgraph with %d diffusion whose length over than %d"% (len(retweet_dict), length))
 
+    # extract diffusion according to subgraph and limit length with/without ego network constraint
     sub_retweet = []
     if ego is True:
         for m_id, retweet_info in retweet_dict.items():
@@ -156,7 +157,15 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
                 sub_retweet.append([a[0] for a in retweet_info[:length]])
                 retweet_info = retweet_info[length:]
     print("select %d retweet message" % (len(sub_retweet)))
-    return sub_graph, sub_retweet
+
+    # reconstruct subgraph whose nodes occur in current diffusion
+    new_node_dict = dict()
+    for retweet_info in sub_retweet:
+        for node in retweet_info:
+            new_node_dict[node] = True
+    new_sub_graph = sub_graph.subgraph([key for key, value in new_node_dict.items() if value==True])
+
+    return new_sub_graph, sub_retweet
 
 
 def show_graph(graph_file):
@@ -274,6 +283,14 @@ def feed_data(batch_size, input_step, input_size, is_train=True):
     batch_x = batch_temp[batch_size:batch_size * 2, :]
     return batch_z, batch_x, batch_z_target
 
+def feed_data_all(data_file="diffusion.pkl", required_num=3000):
+    prepare_data(data_file)
+    global all_data
+    diffusion_list = []
+    for i in range(required_num):
+        diffusion_list.append(all_data["train"][i].tolist())
+    return diffusion_list
+
 
 def glorot(shape, name=None):
     # weight init
@@ -340,7 +357,7 @@ def parse_args():
 						help='Input diffusion data')
 	parser.add_argument('-g_input_step', type=int, default=5,
 						help='Length of diffusion instance for generator. Default is 15.')
-	parser.add_argument('-g_input_size', type=int, default=3744,
+	parser.add_argument('-g_input_size', type=int, default=755,
 						help='Number of nodes. Default is 725.')
 	parser.add_argument('-g_hidden_size', type=int, default=64,
 						help='Number of neurons at hidden layer. Default is 64.')
@@ -351,7 +368,7 @@ def parse_args():
 
 	parser.add_argument('-d_input_step', type=int, default=10,
 						help='Length of diffusion instance for discriminator. Default is 30.')
-	parser.add_argument('-d_input_size', type=int, default=3744,
+	parser.add_argument('-d_input_size', type=int, default=755,
 						help='Number of nodes. Default is 181.')
 	parser.add_argument('-d_hidden_size', type=int, default=10,
 						help='Number of neurons at hidden layer. Default is 64.')
