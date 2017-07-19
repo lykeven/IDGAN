@@ -147,9 +147,6 @@ class GAN_RNN_GCN():
         self.lap = tf.placeholder(tf.float32, [self.num_support, self.d_input_size, self.d_input_size])
 
 
-        def compute_loss(x, y):
-            return tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=x, labels=y))
-
         self.D = self.discriminator(self.x, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size)
         self.D_ = self.discriminator(self.x_, self.d_input_step, self.d_input_size, self.d_hidden_size, 1, self.g_batch_size, reuse=True)
 
@@ -160,23 +157,13 @@ class GAN_RNN_GCN():
             self.d_loss = self.d_loss_real - self.d_loss_fake
 
         else:
-            self.d_loss_real = compute_loss(self.D, tf.ones_like(self.D))
-            self.d_loss_fake = compute_loss(self.D_, tf.zeros_like(self.D_))
-            self.g_loss = compute_loss(self.D_, tf.ones_like(self.D_))
+            self.d_loss_real = utils.compute_loss(self.D, tf.ones_like(self.D))
+            self.d_loss_fake = utils.compute_loss(self.D_, tf.zeros_like(self.D_))
+            self.g_loss = utils.compute_loss(self.D_, tf.ones_like(self.D_))
             self.d_loss = self.d_loss_real + self.d_loss_fake
 
 
-        def compute_accuracy(x, y):
-            # correct_pred = tf.equal(tf.argmax(x, 2), tf.argmax(y, 2))
-            # return tf.reduce_mean(tf.cast(correct_pred, tf.float32))
-            intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))
-            union = tf.sets.set_union(tf.argmax(x, 2), tf.argmax(y, 2))
-            correct_number = tf.reduce_sum(tf.sets.set_size(intersection))
-            total_number = tf.reduce_sum(tf.sets.set_size(union))
-            # return tf.cast(correct_number, tf.float32) / self.d_input_step / self.d_batch_size
-            return tf.cast(correct_number, tf.float32) / tf.cast(total_number, tf.float32)
-
-        self.accuracy = compute_accuracy(self.z_t, self.z_)
+        self.accuracy = utils.compute_accuracy(self.z_t, self.z_)
 
     def train(self,):
         self.w_g = [w for w in tf.global_variables() if 'generator' in w.name]

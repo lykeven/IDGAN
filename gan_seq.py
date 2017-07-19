@@ -124,6 +124,47 @@ class Generator(object):
         self.g_grad, _ = tf.clip_by_global_norm(tf.gradients(self.g_loss, self.g_params), self.grad_clip)
         self.g_updates = g_opt.apply_gradients(zip(self.g_grad, self.g_params))
 
+        #######################################################################################################
+        #  Performance test with Generating last half sequence
+        #######################################################################################################
+
+        g_pred_prob = tensor_array_ops.TensorArray(
+            dtype=tf.float32, size=self.sequence_length,
+            dynamic_size=False, infer_shape=True)
+
+        gen_o_f2 = tensor_array_ops.TensorArray(dtype=tf.float32, size=self.sequence_length / 2,
+                                                dynamic_size=False, infer_shape=True)
+        gen_x_f2 = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length / 2,
+                                                dynamic_size=False, infer_shape=True)
+
+        _, x_f2, h_f2, pre = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, _3: i < self.sequence_length / 2,
+            body=_pretrain_recurrence,
+            loop_vars=(tf.constant(0, dtype=tf.int32),
+                       tf.nn.embedding_lookup(self.g_embeddings, self.start_token),
+                       self.h0, g_pred_prob))
+        _, _, _, _, gen_seq = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, _3, _4: i < self.sequence_length / 2,
+            body=_g_recurrence,
+            loop_vars=(tf.constant(0, dtype=tf.int32),
+                       x_f2, h_f2, gen_o_f2, gen_x_f2))
+
+        gen_seq = tf.transpose(gen_seq.stack(), perm=[1, 0])  # batch_size x seq_length / 2
+        ground_truth = self.x[:, self.sequence_length / 2:]
+
+        def compute_accuracy(x, y):
+            intersection = tf.sets.set_intersection(x, y)
+            union = tf.sets.set_union(x, y)
+            correct_number = tf.cast(tf.sets.set_size(intersection), tf.float32)
+            total_number = tf.cast(tf.sets.set_size(union), tf.float32)
+            return tf.reduce_mean(correct_number * 1.0 / total_number)
+
+        self.accuracy = compute_accuracy(gen_seq, ground_truth)
+
+    def get_accuracy(self, sess, x):
+        output = sess.run(self.accuracy, feed_dict={self.x: x})
+        return output
+
     def generate(self, sess):
         outputs = sess.run(self.gen_x)
         return outputs
@@ -718,6 +759,16 @@ def pre_train_epoch(sess, trainable_model, data_loader):
     return np.mean(supervised_g_losses)
 
 
+def test_accuracy_epoch(sess, trainable_model, data_loader, test_epochs=2):
+    accuracy_list = []
+    data_loader.reset_pointer()
+    for it in xrange(test_epochs):
+        batch = data_loader.next_batch()
+        accuracy = trainable_model.get_accuracy(sess, batch)
+        accuracy_list.append(accuracy)
+    print("Test accuracy : %.5f" % (np.mean(accuracy_list)))
+
+
 def main():
     #########################################################################################
     #  Generator  Hyper-parameters
@@ -728,8 +779,8 @@ def main():
     START_TOKEN = 0
     PRE_EPOCH_NUM = 120  # supervise (maximum likelihood estimation) epochs
     SEED = 88
-    BATCH_SIZE = 64
-    vocab_size = 3744
+    BATCH_SIZE = 50
+    vocab_size = 755
     generated_num = 400
 
 
@@ -790,6 +841,7 @@ def main():
             print 'pre-train epoch ', epoch, 'test_loss ', test_loss
             buffer = 'epoch:\t'+ str(epoch) + '\tnll:\t' + str(test_loss) + '\n'
             log.write(buffer)
+            test_accuracy_epoch(sess, generator, gen_data_loader)
 
     print 'Start pre-training discriminator...'
     # Train 3 epoch on the generated data and do this for 50 times
@@ -828,6 +880,7 @@ def main():
             buffer = 'epoch:\t' + str(total_batch) + '\tnll:\t' + str(test_loss) + '\n'
             print 'total_batch: ', total_batch, 'test_loss: ', test_loss
             log.write(buffer)
+            test_accuracy_epoch(sess, generator, gen_data_loader)
 
         # Update roll-out parameters
         rollout.update_params()

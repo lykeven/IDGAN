@@ -14,7 +14,7 @@ import argparse
 
 
 def read_network(max_node_num=10000):
-    # read the network from input file
+    """read the network from input file"""
     G = nx.DiGraph()
     edges = []
     network_file = "weibo_network.txt"
@@ -34,6 +34,7 @@ def read_network(max_node_num=10000):
 
 
 def read_map(max_node_num=10000):
+    """read the map relation between original node id and new id from input file"""
     node2id = dict()
     map_file = "uidlist.txt"
     f = open(map_file)
@@ -46,6 +47,7 @@ def read_map(max_node_num=10000):
 
 
 def read_feature(node2id, max_node_num=10000):
+    """read the node features for nodes which appear in subgraph"""
     info_dict = dict()
     feature_file1 = "user_profile1.txt"
     feature_file2 = "user_profile2.txt"
@@ -73,6 +75,7 @@ def read_feature(node2id, max_node_num=10000):
 
 
 def read_diffusion(max_node_num=10000, min_length=10):
+    """read the diffusion instances for nodes which appear in subgraph"""
     m_info_dict = dict()
     m_retweet_dict = dict()
     diffusion_file = "total.txt"
@@ -100,7 +103,7 @@ def read_diffusion(max_node_num=10000, min_length=10):
 
 
 def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30, single=False, ego=False):
-    # extract a dense sub graph according to several max-degree node or 3-ego network of one node
+    """extract a dense sub graph according to several max-degree node or 3-ego network of one node"""
     selected_node_dict = dict()
     degree_dict = graph.in_degree()
     ordered_degree = sorted(degree_dict.items(), key=lambda a: a[1], reverse=True)
@@ -178,7 +181,7 @@ def show_graph(graph_file):
 
 
 def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion_data_file="diffusion.pkl", length=30):
-    # save data to file
+    """save data to files, including a graph file and diffusion and features in .pkl file"""
     node2id = dict([(node, vid) for vid, node in enumerate(subgraph.nodes())])
     print("remap node done")
 
@@ -213,6 +216,7 @@ def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion
 
 
 def preprocess_data(args):
+    """preprocess data and save data into file"""
     max_node_num = 100000
     num_node = 100
     min_length = 10
@@ -274,6 +278,7 @@ def load_gcn_data(filename, num_support):
 
 
 def feed_data(batch_size, input_step, input_size, is_train=True):
+    """feed data for training or testing"""
     if is_train:
         batch_temp = train_next_batch(batch_size * 2, input_size)
     else:
@@ -283,20 +288,15 @@ def feed_data(batch_size, input_step, input_size, is_train=True):
     batch_x = batch_temp[batch_size:batch_size * 2, :]
     return batch_z, batch_x, batch_z_target
 
+
 def feed_data_all(data_file="diffusion.pkl", required_num=3000):
+    """feed all diffusion with list format for gan_seq"""
     prepare_data(data_file)
     global all_data
     diffusion_list = []
     for i in range(required_num):
         diffusion_list.append(all_data["train"][i].tolist())
     return diffusion_list
-
-
-def glorot(shape, name=None):
-    # weight init
-    init_range = np.sqrt(6.0/(shape[0]+shape[1]))
-    initial = tf.random_uniform(shape, minval=-init_range, maxval=init_range, dtype=tf.float32)
-    return tf.Variable(initial, name=name)
 
 
 def normalize_adj(adj):
@@ -310,9 +310,7 @@ def normalize_adj(adj):
 
 
 def chebyshev_polynomials(adj, k):
-    # Calculate Chebyshev polynomials up to order k.
-    print("Calculating Chebyshev polynomials up to order {}...".format(k))
-
+    """Calculate Chebyshev polynomials up to order k"""
     adj_normalized = normalize_adj(adj)
     laplacian = np.eye(adj.shape[0]) - adj_normalized
     largest_eigval, _ = eigsh(laplacian, 1, which='LM')
@@ -331,8 +329,29 @@ def chebyshev_polynomials(adj, k):
     return np.asarray(t_k)
 
 
+def glorot(shape, name=None):
+    # weight init
+    init_range = np.sqrt(6.0/(shape[0]+shape[1]))
+    initial = tf.random_uniform(shape, minval=-init_range, maxval=init_range, dtype=tf.float32)
+    return tf.Variable(initial, name=name)
+
+
+def compute_loss(x, y):
+    # compute sigmoid cross entropy between logits and labels
+    return tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=x, labels=y))
+
+
+def compute_accuracy(x, y):
+    """compute mean jaccard similarity of corresponding diffusion "between x and y"""
+    intersection = tf.sets.set_intersection(tf.argmax(x, 2), tf.argmax(y, 2))
+    union = tf.sets.set_union(tf.argmax(x, 2), tf.argmax(y, 2))
+    correct_number = tf.cast(tf.sets.set_size(intersection), tf.float32)
+    total_number = tf.cast(tf.sets.set_size(union), tf.float32)
+    return tf.reduce_mean(correct_number * 1.0 / total_number)
+
+
 def gumbel_softmax(logits, temperature, eps=1e-20, hard=False):
-  # Draw a sample from the Gumbel softmax distribution
+  """Draw a sample from the Gumbel softmax distribution"""
   U = tf.random_uniform(tf.shape(logits), minval=0, maxval=1)
   temp = logits -tf.log(-tf.log(U + eps) + eps)
   y = tf.nn.softmax( temp / temperature)
@@ -345,6 +364,7 @@ def gumbel_softmax(logits, temperature, eps=1e-20, hard=False):
 
 
 def compute_temperature(epochs=0, init_t=5.0, min_t=1.0, rate=3e-3):
+    # compute decay temperature with time
     return np.maximum(init_t * np.exp(-rate * epochs), min_t)
 
 
