@@ -717,11 +717,11 @@ class Dis_dataloader():
 
 
 
-def generate_samples(sess, trainable_model, batch_size, generated_num, output_file, is_real=False, data_file="diffusion2.pkl"):
+def generate_samples(sess, trainable_model, batch_size, generated_num, output_file, is_real=False, data_file="diffusion2.pkl", is_test=False):
     # Generate Samples
     generated_samples = []
     if is_real is True:
-        generated_samples = utils.feed_data_all(data_file, generated_num)
+        generated_samples = utils.feed_data_all(data_file, generated_num, is_test)
     else:
         for _ in range(int(generated_num / batch_size)):
             generated_samples.extend(trainable_model.generate(sess))
@@ -779,9 +779,10 @@ def main():
     START_TOKEN = 0
     PRE_EPOCH_NUM = 120  # supervise (maximum likelihood estimation) epochs
     SEED = 88
-    BATCH_SIZE = 50
+    BATCH_SIZE = 25
     vocab_size = 755
-    generated_num = 400
+    generated_num = 225
+    generated_num_test = 50
 
 
 
@@ -793,7 +794,6 @@ def main():
     dis_num_filters = [100, 200, 200, 200, 200, 100, 100, 100, 100, 100]
     dis_dropout_keep_prob = 0.75
     dis_l2_reg_lambda = 0.2
-    dis_batch_size = 64
 
     #########################################################################################
     #  Basic Training Parameters
@@ -802,6 +802,7 @@ def main():
     origin_data_file = 'diffusion2.pkl'
     positive_file = 'save/real_data.txt'
     negative_file = 'save/generator_sample.txt'
+    test_file = 'save/test_data.txt'
     eval_file = 'save/eval_file.txt'
     target_params_file = 'save/target_params.pkl'
     log_file = 'save/experiment-log.txt'
@@ -813,6 +814,7 @@ def main():
 
     gen_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH)
     likelihood_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH) # For testing
+    test_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH) # For testing
     dis_data_loader = Dis_dataloader(BATCH_SIZE, SEQ_LENGTH)
 
     generator = Generator(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN)
@@ -828,6 +830,10 @@ def main():
     generate_samples(sess, generator, BATCH_SIZE, generated_num, positive_file, True, origin_data_file)
     gen_data_loader.create_batches(positive_file)
 
+    # save test data into test_file
+    generate_samples(sess, generator, BATCH_SIZE, generated_num_test, test_file, True, origin_data_file, True)
+    test_data_loader.create_batches(test_file)
+
     log = open(log_file, 'w')
     #  pre-train generator
     print 'Start pre-training...'
@@ -841,7 +847,7 @@ def main():
             print 'pre-train epoch ', epoch, 'test_loss ', test_loss
             buffer = 'epoch:\t'+ str(epoch) + '\tnll:\t' + str(test_loss) + '\n'
             log.write(buffer)
-            test_accuracy_epoch(sess, generator, gen_data_loader)
+            test_accuracy_epoch(sess, generator, test_data_loader)
 
     print 'Start pre-training discriminator...'
     # Train 3 epoch on the generated data and do this for 50 times
@@ -880,7 +886,7 @@ def main():
             buffer = 'epoch:\t' + str(total_batch) + '\tnll:\t' + str(test_loss) + '\n'
             print 'total_batch: ', total_batch, 'test_loss: ', test_loss
             log.write(buffer)
-            test_accuracy_epoch(sess, generator, gen_data_loader)
+            test_accuracy_epoch(sess, generator, test_data_loader)
 
         # Update roll-out parameters
         rollout.update_params()

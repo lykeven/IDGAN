@@ -146,7 +146,7 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
                 for v, u in graph.out_edges(start_node):
                     start_neibor[u] = True
                 for i in range(j+1, len(diff_node_list)):
-                    if diff_node_list[i][0] in start_neibor:
+                    if diff_node_list[i][0] in start_neibor and diff_node_list[i][0] not in diffusion_set:
                         diffusion_set.append(diff_node_list[i][0])
                         for v, u in graph.out_edges(diff_node_list[i][0]):
                             start_neibor[u] = True
@@ -212,6 +212,13 @@ def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion
     data = {"train":diff_train, "test":diff_test, "feature":feature_matrix}
     with open(diffusion_data_file, 'w') as f:
         cp.dump(data, f)
+
+    diffusion_file = "diffusion.txt"
+    f_diff = open(diffusion_file, 'w')
+    for i, retweet in enumerate(sub_retweet):
+        f_diff.write("\t".join([str(node2id[v]) for v in retweet]) + "\n")
+    f_diff.close()
+
     print("diffusion write done with %d diffusion path" % (len(sub_retweet)))
 
 
@@ -289,13 +296,17 @@ def feed_data(batch_size, input_step, input_size, is_train=True):
     return batch_z, batch_x, batch_z_target
 
 
-def feed_data_all(data_file="diffusion.pkl", required_num=3000):
+def feed_data_all(data_file="diffusion.pkl", required_num=500, is_test=False):
     """feed all diffusion with list format for gan_seq"""
     prepare_data(data_file)
     global all_data
     diffusion_list = []
-    for i in range(required_num):
-        diffusion_list.append(all_data["train"][i].tolist())
+    if is_test is True:
+        for i in range(required_num):
+            diffusion_list.append(all_data["test"][i].tolist())
+    else:
+        for i in range(required_num):
+            diffusion_list.append(all_data["train"][i].tolist())
     return diffusion_list
 
 
