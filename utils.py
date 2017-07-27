@@ -235,8 +235,8 @@ def preprocess_data(args):
     save_data(sub_graph, sub_retweet, u_info, args.graph_file, args.data_file, min_length)
 
     # show_graph(graph_file)
-    prepare_data()
-    batch_data = train_next_batch(batch_size=128, input_size=sub_graph.number_of_nodes())
+    # prepare_data()
+    # batch_data = train_next_batch(batch_size=128, input_size=sub_graph.number_of_nodes())
 
 
 train_pos = 0
