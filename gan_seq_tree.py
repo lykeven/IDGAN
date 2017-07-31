@@ -28,7 +28,7 @@ class Generator(object):
         self.grad_clip = 5.0
 
         graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
-        self.adj = tf.constant(np.asarray(nx.adjacency_matrix(graph).todense()), dtype=tf.int32, shape=[num_emb, num_emb])
+        self.adj = tf.constant(np.asarray(nx.adjacency_matrix(graph).todense()).transpose(), dtype=tf.int32, shape=[num_emb, num_emb])
 
         self.expected_reward = tf.Variable(tf.zeros([self.sequence_length]))
 
