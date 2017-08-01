@@ -12,13 +12,14 @@ import utils
 
 class Generator(object):
     def __init__(self, num_emb, batch_size, emb_dim, hidden_dim,
-                 sequence_length, start_token,
+                 sequence_length, start_token, input_length=5,
                  learning_rate=0.01, reward_gamma=0.95, graph_file="graph2.txt"):
         self.num_emb = num_emb
         self.batch_size = batch_size
         self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
         self.sequence_length = sequence_length
+        self.input_length = input_length
         self.start_token = tf.constant([start_token] * self.batch_size, dtype=tf.int32)
         self.learning_rate = tf.Variable(float(learning_rate), trainable=False)
         self.reward_gamma = reward_gamma
@@ -119,7 +120,7 @@ class Generator(object):
         def _g_recurrence_2(i, x_t, h_tm1, gen_o, gen_x, g_predictions, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            g_predictions = g_predictions.write(i + self.sequence_length / 2, tf.nn.softmax(o_t))  # batch x vocab_size
+            g_predictions = g_predictions.write(i + self.input_length, tf.nn.softmax(o_t))  # batch x vocab_size
             log_prob = tf.log(tf.nn.softmax(o_t))
             next_token = tf.cast(
                 tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
@@ -137,29 +138,29 @@ class Generator(object):
             dtype=tf.float32, size=self.sequence_length,
             dynamic_size=False, infer_shape=True)
 
-        gen_o_f2 = tensor_array_ops.TensorArray(dtype=tf.float32, size=self.sequence_length / 2,
+        gen_o_f2 = tensor_array_ops.TensorArray(dtype=tf.float32, size=self.sequence_length - self.input_length,
                                                 dynamic_size=False, infer_shape=True)
-        gen_x_f2 = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length / 2,
+        gen_x_f2 = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length - self.input_length,
                                                 dynamic_size=False, infer_shape=True)
 
         self.neghbor = tf.placeholder(tf.int32, shape=[self.batch_size, self.num_emb])
         # init_neghbor = tf.Variable(tf.zeros([self.batch_size, self.num_emb],dtype=tf.int32))
 
         _, x_f2, h_f2, g_predictions_2, new_neghbor = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4: i < self.sequence_length / 2,
+            cond=lambda i, _1, _2, _3, _4: i < self.input_length,
             body=_pretrain_recurrence_2,
             loop_vars=(tf.constant(0, dtype=tf.int32),
                        tf.nn.embedding_lookup(self.g_embeddings, self.start_token),
                        self.h0, g_predictions_2, self.neghbor))
         _, _, _, _, gen_seq, self.g_predictions_2, new_neghbor = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4, _5, _6: i < self.sequence_length / 2,
+            cond=lambda i, _1, _2, _3, _4, _5, _6: i < self.sequence_length - self.input_length,
             body=_g_recurrence_2,
             loop_vars=(tf.constant(0, dtype=tf.int32),
                        x_f2, h_f2, gen_o_f2, gen_x_f2, g_predictions_2, new_neghbor))
 
         self.g_predictions_2 = tf.transpose(self.g_predictions_2.stack(), perm=[1, 0, 2])  # batch_size x seq_length x vocab_size
         self.gen_seq = tf.transpose(gen_seq.stack(), perm=[1, 0])  # batch_size x seq_length / 2
-        self.gen_x = tf.concat([self.x[:, :self.sequence_length / 2], self.gen_seq], axis=1)
+        self.gen_x = tf.concat([self.x[:, :self.input_length], self.gen_seq], axis=1)
 
         def compute_accuracy(x, y):
             intersection = tf.sets.set_intersection(x, y)
@@ -168,7 +169,7 @@ class Generator(object):
             total_number = tf.cast(tf.sets.set_size(union), tf.float32)
             return tf.reduce_mean(correct_number * 1.0 / total_number)
 
-        ground_truth = self.x[:, self.sequence_length / 2:]
+        ground_truth = self.x[:, self.sequence_length - self.input_length:]
         self.accuracy = compute_accuracy(self.gen_seq, ground_truth)
 
         self.train_loss = -tf.reduce_sum(
@@ -198,8 +199,8 @@ class Generator(object):
 
     def generate_step(self, sess, x):
         feed_dict = {self.x: x, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
-        outputs = sess.run(self.gen_x, feed_dict=feed_dict)
-        return outputs
+        generate_sequence, generate_prob_table = sess.run([self.gen_x, self.g_predictions_2], feed_dict=feed_dict)
+        return generate_sequence, generate_prob_table
 
 
     def get_accuracy(self, sess, x):
@@ -720,11 +721,12 @@ class Dis_dataloader():
 
 
 
-def generate_samples(sess, trainable_model, batch_size, generated_num, real_samples):
+def generate_samples(sess, trainable_model, batch_size, train_batch, real_samples):
     # Generate Samples
     generated_samples = []
-    for i in range(int(generated_num / batch_size)):
-        generated_samples.extend(trainable_model.generate_step(sess, real_samples[i * batch_size: (i + 1) * batch_size]))
+    for i in range(train_batch):
+        samples, _ = trainable_model.generate_step(sess, real_samples[i * batch_size: (i + 1) * batch_size])
+        generated_samples.extend(samples)
     return generated_samples
 
 
@@ -738,18 +740,45 @@ def pre_train_epoch(sess, trainable_model, batch_size, num_batch):
     return np.mean(supervised_g_losses)
 
 
-def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch=2):
+def candidate_measure(positive_samples, negative_samples, g_prediction, adjacency_matrix, input_length, num=5, prob=False):
+    batch_size, sequence_length, node_num = g_prediction.shape
+    correct = 0
+    if prob is True:
+        for i in range(batch_size):
+            generate_sequences = negative_samples[i, input_length:]
+            new_prob_table = g_prediction[i, input_length:]
+            # new_prob_table = np.reshape(g_prediction[i, input_length:], ((sequence_length - input_length) * node_num))
+            indices = np.reshape(np.argsort(-new_prob_table, axis=1)[:, :num], [-1]) % node_num
+            correct += len(set(indices) & set(generate_sequences))
+    else:
+        for i in range(batch_size):
+            generate_sequences = negative_samples[i, input_length:]
+            real_sequences = positive_samples[i, input_length:]
+            neighbors = np.sum(adjacency_matrix[real_sequences], axis=0)
+            indices = np.argsort(-neighbors)[:(sequence_length - input_length) * num]
+            correct += len(set(indices) & set(generate_sequences))
+    return correct * 1.0 / batch_size / (sequence_length - input_length)
+
+
+def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch, input_length, adjacency_matrix):
     accuracy_list = [0.0] * num_batch
     loss_list = [0.0] * num_batch
+    p_num_list = [0.0] * num_batch
+    n_num_list = [0.0] * num_batch
     for i in xrange(num_batch):
         batch = utils.test_next_batch(batch_size, hard=True)
+        neg_batch, g_prediction = trainable_model.generate_step(sess, batch)
         accuracy_list[i], loss_list[i] = trainable_model.get_accuracy(sess, batch)
-    return np.mean(accuracy_list), np.mean(loss_list)
+
+        p_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=5,prob=False)
+        n_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=5,prob=True)
+
+    return np.mean(accuracy_list), np.mean(loss_list), np.mean(p_num_list), np.mean(n_num_list)
 
 
-def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, generated_num, positive_samples, dis_data_loader, dis_dropout_keep_prob = 0.75):
+def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, train_batch, positive_samples, dis_data_loader, dis_dropout_keep_prob = 0.75):
     for _ in range(epoch_num):
-        negative_samples = generate_samples(sess, generator, batch_size, generated_num, positive_samples)
+        negative_samples = generate_samples(sess, generator, batch_size, train_batch, positive_samples)
         dis_data_loader.load_train_data(positive_samples, negative_samples)
         for _ in range(3):
             dis_data_loader.reset_pointer()
@@ -757,6 +786,7 @@ def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, ge
                 x_batch, y_batch = dis_data_loader.next_batch()
                 feed = {discriminator.input_x: x_batch, discriminator.input_y: y_batch, discriminator.dropout_keep_prob: dis_dropout_keep_prob}
                 _ = sess.run(discriminator.train_op, feed)
+
 
 
 def main():
@@ -769,13 +799,17 @@ def main():
     START_TOKEN = 0
 
     TOTAL_BATCH = 200
-    PRE_EPOCH_NUM = 10  # supervise (maximum likelihood estimation) epochs
+    PRE_EPOCH_NUM = 1  # supervise (maximum likelihood estimation) epochs
     SEED = 88
     BATCH_SIZE = 25
     vocab_size = 755
+    train_percent = 0.6
+
     generated_num = 225
     generated_num_test = 50
 
+
+    input_length = int(SEQ_LENGTH * train_percent)
     train_batch = int(generated_num / BATCH_SIZE)
     test_batch = int(generated_num_test / BATCH_SIZE)
 
@@ -801,7 +835,7 @@ def main():
     np.random.seed(SEED)
     assert START_TOKEN == 0
 
-    generator = Generator(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN, graph_file=graph_file)
+    generator = Generator(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN, input_length, graph_file=graph_file)
     discriminator = Discriminator(sequence_length=SEQ_LENGTH, num_classes=2, vocab_size=vocab_size, embedding_size=dis_embedding_dim,
                                 filter_sizes=dis_filter_sizes, num_filters=dis_num_filters, l2_reg_lambda=dis_l2_reg_lambda)
 
@@ -814,20 +848,23 @@ def main():
     dis_data_loader = Dis_dataloader(BATCH_SIZE, SEQ_LENGTH)
     positive_samples = utils.feed_data_all(origin_data_file, generated_num)
 
+    graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
+    adjacency_matrix = np.asarray(nx.adjacency_matrix(graph).todense()).transpose()
+
 
     #  pre-train generator
     print 'Start pre-training...'
     for epoch in xrange(PRE_EPOCH_NUM):
-        loss = pre_train_epoch(sess, generator, BATCH_SIZE, int(generated_num / BATCH_SIZE))
+        loss = pre_train_epoch(sess, generator, BATCH_SIZE, train_batch)
         print 'pre-train epoch:%d loss:%.3f' % (epoch, loss)
         if epoch % 5 == 0:
-            accuracy, test_loss = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch)
-            print 'pre-train epoch:%d loss:%.5f jaccard:%.5f' % (epoch, test_loss, accuracy)
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch, input_length, adjacency_matrix)
+            print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
 
     print 'Start pre-training discriminator...'
     # Train 3 epoch on the generated data and do this for 50 times
-    train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, generated_num, positive_samples,
-                           dis_data_loader, dis_dropout_keep_prob=0.75)
+    train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, train_batch, positive_samples,
+                           dis_data_loader, dis_dropout_keep_prob)
 
     rollout = ROLLOUT(generator, 0.8)
 
@@ -836,21 +873,21 @@ def main():
     for epoch in range(TOTAL_BATCH):
         # Train the generator for one step
         for it in range(1):
-            no = np.random.randint(0, generated_num / BATCH_SIZE)
-            samples = generator.generate_step(sess, positive_samples[no * BATCH_SIZE :(no +1) * BATCH_SIZE])
+            no = np.random.randint(0, train_batch)
+            samples, _ = generator.generate_step(sess, positive_samples[no * BATCH_SIZE :(no +1) * BATCH_SIZE])
             rewards = rollout.get_reward(sess, samples, 16, discriminator)
             generator.update_step(sess, samples, rewards)
         # Test
         if epoch % 5 == 0 or epoch == TOTAL_BATCH - 1:
-            accuracy, test_loss = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch)
-            print 'train epoch:%d loss:%.3f jaccard:%.3f' % (epoch, test_loss, accuracy)
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch, input_length, adjacency_matrix)
+            print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
 
         # Update roll-out parameters
         rollout.update_params()
 
         # Train the discriminator
-        train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, generated_num, positive_samples,
-                           dis_data_loader, dis_dropout_keep_prob=0.75)
+        train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, train_batch, positive_samples,
+                           dis_data_loader, dis_dropout_keep_prob)
 
 
 if __name__ == '__main__':
