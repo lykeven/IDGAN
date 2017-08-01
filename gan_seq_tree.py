@@ -43,40 +43,19 @@ class Generator(object):
         self.rewards = tf.placeholder(tf.float32, shape=[self.batch_size, self.sequence_length]) # get from rollout policy and discriminator
 
         # processed for batch
-        with tf.device("/cpu:0"):
-            self.processed_x = tf.transpose(tf.nn.embedding_lookup(self.g_embeddings, self.x), perm=[1, 0, 2])  # seq_length x batch_size x emb_dim
-            self.x_seq = tf.transpose(self.x, perm=[1, 0])
+        self.processed_x = tf.transpose(tf.nn.embedding_lookup(self.g_embeddings, self.x), perm=[1, 0, 2])  # seq_length x batch_size x emb_dim
+        self.x_seq = tf.transpose(self.x, perm=[1, 0])
 
         # Initial states
         self.h0 = tf.zeros([self.batch_size, self.hidden_dim])
         self.h0 = tf.stack([self.h0, self.h0])
 
-        gen_o = tensor_array_ops.TensorArray(dtype=tf.float32, size=self.sequence_length,
-                                             dynamic_size=False, infer_shape=True)
-        gen_x = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length,
-                                             dynamic_size=False, infer_shape=True)
+        self.pretrain()
+        self.generate()
+        self.update()
 
-        def _g_recurrence(i, x_t, h_tm1, gen_o, gen_x):
-            h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
-            o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            log_prob = tf.log(tf.nn.softmax(o_t))
-            next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
-            x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
-            gen_o = gen_o.write(i, tf.reduce_sum(tf.multiply(tf.one_hot(next_token, self.num_emb, 1.0, 0.0),
-                                                             tf.nn.softmax(o_t)), 1))  # [batch_size] , prob
-            gen_x = gen_x.write(i, next_token)  # indices, batch_size
-            return i + 1, x_tp1, h_t, gen_o, gen_x
 
-        _, _, _, self.gen_o, self.gen_x = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4: i < self.sequence_length,
-            body=_g_recurrence,
-            loop_vars=(tf.constant(0, dtype=tf.int32),
-                       tf.nn.embedding_lookup(self.g_embeddings, self.start_token), self.h0, gen_o, gen_x))
-
-        self.gen_x = self.gen_x.stack()  # seq_length x batch_size
-        self.gen_x = tf.transpose(self.gen_x, perm=[1, 0])  # batch_size x seq_length
-
-        # supervised pretraining for generator
+    def pretrain(self,):
         g_predictions = tensor_array_ops.TensorArray(
             dtype=tf.float32, size=self.sequence_length,
             dynamic_size=False, infer_shape=True)
@@ -84,10 +63,6 @@ class Generator(object):
         ta_emb_x = tensor_array_ops.TensorArray(
             dtype=tf.float32, size=self.sequence_length)
         ta_emb_x = ta_emb_x.unstack(self.processed_x)
-
-        ta_ind_x = tensor_array_ops.TensorArray(
-            dtype=tf.int32, size=self.sequence_length)
-        ta_ind_x = ta_ind_x.unstack(self.x_seq)
 
         def _pretrain_recurrence(i, x_t, h_tm1, g_predictions):
             h_t = self.g_recurrent_unit(x_t, h_tm1)
@@ -118,24 +93,18 @@ class Generator(object):
         self.pretrain_grad, _ = tf.clip_by_global_norm(tf.gradients(self.pretrain_loss, self.g_params), self.grad_clip)
         self.pretrain_updates = pretrain_opt.apply_gradients(zip(self.pretrain_grad, self.g_params))
 
-        #######################################################################################################
-        #  Unsupervised Training
-        #######################################################################################################
-        self.g_loss = -tf.reduce_sum(
-            tf.reduce_sum(
-                tf.one_hot(tf.to_int32(tf.reshape(self.x, [-1])), self.num_emb, 1.0, 0.0) * tf.log(
-                    tf.clip_by_value(tf.reshape(self.g_predictions, [-1, self.num_emb]), 1e-20, 1.0)
-                ), 1) * tf.reshape(self.rewards, [-1])
-        )
 
-        g_opt = self.g_optimizer(self.learning_rate)
+    def generate(self,):
+        # supervised pretraining for generator
+        ta_emb_x = tensor_array_ops.TensorArray(
+            dtype=tf.float32, size=self.sequence_length)
+        ta_emb_x = ta_emb_x.unstack(self.processed_x)
 
-        self.g_grad, _ = tf.clip_by_global_norm(tf.gradients(self.g_loss, self.g_params), self.grad_clip)
-        self.g_updates = g_opt.apply_gradients(zip(self.g_grad, self.g_params))
+        ta_ind_x = tensor_array_ops.TensorArray(
+            dtype=tf.int32, size=self.sequence_length)
+        ta_ind_x = ta_ind_x.unstack(self.x_seq)
 
-        #######################################################################################################
-        #  Performance test with Generating last half sequence
-        #######################################################################################################
+
         def _pretrain_recurrence_2(i, x_t, h_tm1, g_predictions, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)
             o_t = self.g_output_unit(h_t)
@@ -147,12 +116,13 @@ class Generator(object):
             neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
             return i + 1, x_tp1, h_t, g_predictions, neighbor
 
-
-        def _g_recurrence_2(i, x_t, h_tm1, gen_o, gen_x, neighbor):
+        def _g_recurrence_2(i, x_t, h_tm1, gen_o, gen_x, g_predictions, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
+            g_predictions = g_predictions.write(i + self.sequence_length / 2, tf.nn.softmax(o_t))  # batch x vocab_size
             log_prob = tf.log(tf.nn.softmax(o_t))
-            next_token = tf.cast(tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
+            next_token = tf.cast(
+                tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
             x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
             gen_o = gen_o.write(i, tf.reduce_sum(tf.multiply(tf.one_hot(next_token, self.num_emb, 1.0, 0.0),
                                                              tf.nn.softmax(o_t)), 1))  # [batch_size] , prob
@@ -161,10 +131,9 @@ class Generator(object):
             # temp = tf.gather_nd(self.adj, [next_token])
             temp = tf.nn.embedding_lookup(self.adj, next_token)
             neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
-            return i + 1, x_tp1, h_t, gen_o, gen_x, neighbor
+            return i + 1, x_tp1, h_t, gen_o, gen_x, g_predictions, neighbor
 
-
-        g_pred_prob = tensor_array_ops.TensorArray(
+        g_predictions_2 = tensor_array_ops.TensorArray(
             dtype=tf.float32, size=self.sequence_length,
             dynamic_size=False, infer_shape=True)
 
@@ -173,22 +142,24 @@ class Generator(object):
         gen_x_f2 = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length / 2,
                                                 dynamic_size=False, infer_shape=True)
 
-        init_neghbor = tf.Variable(tf.zeros([self.batch_size, self.num_emb],dtype=tf.int32))
+        self.neghbor = tf.placeholder(tf.int32, shape=[self.batch_size, self.num_emb])
+        # init_neghbor = tf.Variable(tf.zeros([self.batch_size, self.num_emb],dtype=tf.int32))
 
-        _, x_f2, h_f2, pre, new_neighbor = control_flow_ops.while_loop(
+        _, x_f2, h_f2, g_predictions_2, new_neghbor = control_flow_ops.while_loop(
             cond=lambda i, _1, _2, _3, _4: i < self.sequence_length / 2,
             body=_pretrain_recurrence_2,
             loop_vars=(tf.constant(0, dtype=tf.int32),
                        tf.nn.embedding_lookup(self.g_embeddings, self.start_token),
-                       self.h0, g_pred_prob, init_neghbor))
-        _, _, _, _, gen_seq, final_neighbor = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4, _5: i < self.sequence_length / 2,
+                       self.h0, g_predictions_2, self.neghbor))
+        _, _, _, _, gen_seq, self.g_predictions_2, new_neghbor = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, _3, _4, _5, _6: i < self.sequence_length / 2,
             body=_g_recurrence_2,
             loop_vars=(tf.constant(0, dtype=tf.int32),
-                       x_f2, h_f2, gen_o_f2, gen_x_f2, new_neighbor))
+                       x_f2, h_f2, gen_o_f2, gen_x_f2, g_predictions_2, new_neghbor))
 
-        gen_seq = tf.transpose(gen_seq.stack(), perm=[1, 0])  # batch_size x seq_length / 2
-        ground_truth = self.x[:, self.sequence_length / 2:]
+        self.g_predictions_2 = tf.transpose(self.g_predictions_2.stack(), perm=[1, 0, 2])  # batch_size x seq_length x vocab_size
+        self.gen_seq = tf.transpose(gen_seq.stack(), perm=[1, 0])  # batch_size x seq_length / 2
+        self.gen_x = tf.concat([self.x[:, :self.sequence_length / 2], self.gen_seq], axis=1)
 
         def compute_accuracy(x, y):
             intersection = tf.sets.set_intersection(x, y)
@@ -196,20 +167,44 @@ class Generator(object):
             correct_number = tf.cast(tf.sets.set_size(intersection), tf.float32)
             total_number = tf.cast(tf.sets.set_size(union), tf.float32)
             return tf.reduce_mean(correct_number * 1.0 / total_number)
+        ground_truth = self.x[:, self.sequence_length / 2:]
+        self.accuracy = compute_accuracy(self.gen_seq, ground_truth)
 
-        self.accuracy = compute_accuracy(gen_seq, ground_truth)
 
-    def get_accuracy(self, sess, x):
-        output = sess.run(self.accuracy, feed_dict={self.x: x})
-        return output
+    def update(self,):
+        self.g_loss = -tf.reduce_sum(
+            tf.reduce_sum(
+                tf.one_hot(tf.to_int32(tf.reshape(self.x, [-1])), self.num_emb, 1.0, 0.0) * tf.log(
+                    tf.clip_by_value(tf.reshape(self.g_predictions_2, [-1, self.num_emb]), 1e-20, 1.0)
+                ), 1) * tf.reshape(self.rewards, [-1])
+        )
 
-    def generate(self, sess):
-        outputs = sess.run(self.gen_x)
-        return outputs
+        g_opt = self.g_optimizer(self.learning_rate)
+        self.g_grad, _ = tf.clip_by_global_norm(tf.gradients(self.g_loss, self.g_params), self.grad_clip)
+        self.g_updates = g_opt.apply_gradients(zip(self.g_grad, self.g_params))
+
 
     def pretrain_step(self, sess, x):
         outputs = sess.run([self.pretrain_updates, self.pretrain_loss], feed_dict={self.x: x})
         return outputs
+
+
+    def generate_step(self, sess, x):
+        feed_dict = {self.x: x, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+        outputs = sess.run(self.gen_x, feed_dict=feed_dict)
+        return outputs
+
+
+    def get_accuracy(self, sess, x):
+        feed_dict = {self.x: x, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+        output = sess.run(self.accuracy, feed_dict=feed_dict)
+        return output
+
+    def update_step(self, sess, x, reward):
+        feed_dict = {self.x: x, self.rewards:reward, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+        _ = sess.run(self.g_updates, feed_dict)
+
+
 
     def init_matrix(self, shape):
         return tf.random_normal(shape, stddev=0.1)
@@ -469,33 +464,41 @@ class ROLLOUT(object):
         gen_x = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length,
                                              dynamic_size=False, infer_shape=True)
 
+        self.neghbor = tf.placeholder(tf.int32, shape=[self.batch_size, self.num_emb])
+        self.adj = self.lstm.adj
+
         # When current index i < given_num, use the provided tokens as the input at each time step
-        def _g_recurrence_1(i, x_t, h_tm1, given_num, gen_x):
+        def _g_recurrence_1(i, x_t, h_tm1, given_num, gen_x, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             x_tp1 = ta_emb_x.read(i)
             gen_x = gen_x.write(i, ta_x.read(i))
-            return i + 1, x_tp1, h_t, given_num, gen_x
+            temp = tf.nn.embedding_lookup(self.adj, ta_x.read(i))
+            neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
+            return i + 1, x_tp1, h_t, given_num, gen_x, neighbor
 
         # When current index i >= given_num, start roll-out, use the output as time step t as the input at time step t+1
-        def _g_recurrence_2(i, x_t, h_tm1, given_num, gen_x):
+        def _g_recurrence_2(i, x_t, h_tm1, given_num, gen_x, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
             log_prob = tf.log(tf.nn.softmax(o_t))
             next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
             x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
             gen_x = gen_x.write(i, next_token)  # indices, batch_size
-            return i + 1, x_tp1, h_t, given_num, gen_x
+            temp = tf.nn.embedding_lookup(self.adj, next_token)
+            neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
 
-        i, x_t, h_tm1, given_num, self.gen_x = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, given_num, _4: i < given_num,
+            return i + 1, x_tp1, h_t, given_num, gen_x, neighbor
+
+        i, x_t, h_tm1, given_num, self.gen_x, new_neighbor = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, given_num, _4, _5: i < given_num,
             body=_g_recurrence_1,
             loop_vars=(tf.constant(0, dtype=tf.int32),
-                       tf.nn.embedding_lookup(self.g_embeddings, self.start_token), self.h0, self.given_num, gen_x))
+                       tf.nn.embedding_lookup(self.g_embeddings, self.start_token), self.h0, self.given_num, gen_x, self.neghbor))
 
-        _, _, _, _, self.gen_x = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4: i < self.sequence_length,
+        _, _, _, _, self.gen_x, new_neighbor = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, _3, _4, _5: i < self.sequence_length,
             body=_g_recurrence_2,
-            loop_vars=(i, x_t, h_tm1, given_num, self.gen_x))
+            loop_vars=(i, x_t, h_tm1, given_num, self.gen_x, new_neighbor))
 
         self.gen_x = self.gen_x.stack()  # seq_length x batch_size
         self.gen_x = tf.transpose(self.gen_x, perm=[1, 0])  # batch_size x seq_length
@@ -504,7 +507,8 @@ class ROLLOUT(object):
         rewards = []
         for i in range(rollout_num):
             for given_num in range(1, self.sequence_length):
-                feed = {self.x: input_x, self.given_num: given_num}
+                feed = {self.x: input_x, self.given_num: given_num, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+                # feed = {self.x: input_x, self.given_num: given_num}
                 samples = sess.run(self.gen_x, feed)
                 feed = {discriminator.input_x: samples, discriminator.dropout_keep_prob: 1.0}
                 ypred_for_auc = sess.run(discriminator.ypred_for_auc, feed)
@@ -761,8 +765,9 @@ def generate_samples(sess, trainable_model, batch_size, generated_num, output_fi
     if is_real is True:
         generated_samples = utils.feed_data_all(data_file, generated_num, is_test)
     else:
-        for _ in range(int(generated_num / batch_size)):
-            generated_samples.extend(trainable_model.generate(sess))
+        real_samples = utils.feed_data_all(data_file, generated_num, False)
+        for i in range(int(generated_num / batch_size)):
+            generated_samples.extend(trainable_model.generate_step(sess, real_samples[i * batch_size: (i + 1) * batch_size]))
 
     with open(output_file, 'w') as fout:
         for poem in generated_samples:
@@ -815,7 +820,10 @@ def main():
     HIDDEN_DIM = 32  # hidden state dimension of lstm cell
     SEQ_LENGTH = 10  # sequence length
     START_TOKEN = 0
-    PRE_EPOCH_NUM = 120  # supervise (maximum likelihood estimation) epochs
+
+    TOTAL_BATCH = 200
+    PRE_EPOCH_NUM = 10  # supervise (maximum likelihood estimation) epochs
+    PRE_EPOCH_NUM_D = 1  #
     SEED = 88
     BATCH_SIZE = 25
     vocab_size = 755
@@ -836,7 +844,6 @@ def main():
     #########################################################################################
     #  Basic Training Parameters
     #########################################################################################
-    TOTAL_BATCH = 200
     origin_data_file = 'diffusion2.pkl'
     graph_file = 'graph2.txt'
     positive_file = 'save/real_data.txt'
@@ -890,7 +897,7 @@ def main():
 
     print 'Start pre-training discriminator...'
     # Train 3 epoch on the generated data and do this for 50 times
-    for _ in range(50):
+    for _ in range(PRE_EPOCH_NUM_D):
         generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
         dis_data_loader.load_train_data(positive_file, negative_file)
         for _ in range(3):
@@ -909,13 +916,14 @@ def main():
     print '#########################################################################'
     print 'Start Adversarial Training...'
     log.write('adversarial training...\n')
+    real_samples = utils.feed_data_all(origin_data_file, generated_num, False)
     for total_batch in range(TOTAL_BATCH):
         # Train the generator for one step
         for it in range(1):
-            samples = generator.generate(sess)
+            no = np.random.randint(0, generated_num / BATCH_SIZE)
+            samples = generator.generate_step(sess, real_samples[no * BATCH_SIZE :(no +1) * BATCH_SIZE])
             rewards = rollout.get_reward(sess, samples, 16, discriminator)
-            feed = {generator.x: samples, generator.rewards: rewards}
-            _ = sess.run(generator.g_updates, feed_dict=feed)
+            generator.update_step(sess, samples, rewards)
 
         # Test
         if total_batch % 5 == 0 or total_batch == TOTAL_BATCH - 1:
