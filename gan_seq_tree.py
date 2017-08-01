@@ -790,54 +790,56 @@ def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, tr
 
 
 def main():
-    #########################################################################################
+    args = utils.parse_args_new()
+    #  Data Parameters
+    origin_data_file = args.data_file
+    graph_file = args.graph_file
+    generated_num = args.num_train_sample
+    generated_num_test = args.num_test_sample
+    seq_length = args.seq_length
+    vocab_size = args.num_node
+    batch_size = args.batch_size
+    num_epochs = args.num_epochs
+
+
     #  Generator  Hyper-parameters
-    ######################################################################################
-    EMB_DIM = 32  # embedding dimension
-    HIDDEN_DIM = 32  # hidden state dimension of lstm cell
-    SEQ_LENGTH = 10  # sequence length
-    START_TOKEN = 0
+    g_emb_dim = args.g_dim_emb
+    g_hidden_size = args.g_hidden_size
+    g_num_epochs = args.g_epochs
+    g_pretrain_epochs = args.g_pretrain_epochs
+    train_percent = args.train_percent
+    g_num_search = args.g_num_search
+    g_update_rate = args.g_update_rate
 
-    TOTAL_BATCH = 200
-    PRE_EPOCH_NUM = 1  # supervise (maximum likelihood estimation) epochs
-    SEED = 88
-    BATCH_SIZE = 25
-    vocab_size = 755
-    train_percent = 0.6
-
-    generated_num = 225
-    generated_num_test = 50
-
-
-    input_length = int(SEQ_LENGTH * train_percent)
-    train_batch = int(generated_num / BATCH_SIZE)
-    test_batch = int(generated_num_test / BATCH_SIZE)
-
-
-
-    #########################################################################################
     #  Discriminator  Hyper-parameters
-    #########################################################################################
-    PRE_EPOCH_NUM_D = 1
-    dis_embedding_dim = 64
+    d_num_epochs = args.d_epochs
+    d_pretrain_epochs = args.d_pretrain_epochs
+    d_emb_dim = args.d_dim_emb
+    d_dropout_prob = args.d_dropout_prob
+    d_reg_lambda = args.d_reg_lambda
+
+
     dis_filter_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     dis_num_filters = [100, 200, 200, 200, 200, 100, 100, 100, 100, 100]
-    dis_dropout_keep_prob = 0.75
-    dis_l2_reg_lambda = 0.2
 
-    #########################################################################################
-    #  File Parameters
-    #########################################################################################
-    origin_data_file = 'diffusion2.pkl'
-    graph_file = 'graph2.txt'
 
+    START_TOKEN = 0
+    SEED = 88
     random.seed(SEED)
     np.random.seed(SEED)
     assert START_TOKEN == 0
 
-    generator = Generator(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN, input_length, graph_file=graph_file)
-    discriminator = Discriminator(sequence_length=SEQ_LENGTH, num_classes=2, vocab_size=vocab_size, embedding_size=dis_embedding_dim,
-                                filter_sizes=dis_filter_sizes, num_filters=dis_num_filters, l2_reg_lambda=dis_l2_reg_lambda)
+
+    input_length = int(seq_length * train_percent)
+    train_batch = int(generated_num / batch_size)
+    test_batch = int(generated_num_test / batch_size)
+
+    # Model
+
+
+    generator = Generator(vocab_size, batch_size, g_emb_dim, g_hidden_size, seq_length, START_TOKEN, input_length, graph_file=graph_file)
+    discriminator = Discriminator(sequence_length=seq_length, num_classes=2, vocab_size=vocab_size, embedding_size=d_emb_dim,
+                                filter_sizes=dis_filter_sizes, num_filters=dis_num_filters, l2_reg_lambda=d_reg_lambda)
 
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -845,7 +847,7 @@ def main():
     sess.run(tf.global_variables_initializer())
 
     utils.prepare_data(origin_data_file)
-    dis_data_loader = Dis_dataloader(BATCH_SIZE, SEQ_LENGTH)
+    dis_data_loader = Dis_dataloader(batch_size, seq_length)
     positive_samples = utils.feed_data_all(origin_data_file, generated_num)
 
     graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
@@ -854,40 +856,40 @@ def main():
 
     #  pre-train generator
     print 'Start pre-training...'
-    for epoch in xrange(PRE_EPOCH_NUM):
-        loss = pre_train_epoch(sess, generator, BATCH_SIZE, train_batch)
+    for epoch in xrange(g_pretrain_epochs):
+        loss = pre_train_epoch(sess, generator, batch_size, train_batch)
         print 'pre-train epoch:%d loss:%.3f' % (epoch, loss)
         if epoch % 5 == 0:
-            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch, input_length, adjacency_matrix)
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix)
             print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
 
     print 'Start pre-training discriminator...'
     # Train 3 epoch on the generated data and do this for 50 times
-    train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, train_batch, positive_samples,
-                           dis_data_loader, dis_dropout_keep_prob)
+    train_discrimintor(sess, generator, discriminator, d_pretrain_epochs, batch_size, train_batch, positive_samples,
+                           dis_data_loader, d_dropout_prob)
 
-    rollout = ROLLOUT(generator, 0.8)
+    rollout = ROLLOUT(generator, g_update_rate)
 
     print '#########################################################################'
     print 'Start Adversarial Training...'
-    for epoch in range(TOTAL_BATCH):
+    for epoch in range(num_epochs):
         # Train the generator for one step
-        for it in range(1):
+        for it in range(g_num_epochs):
             no = np.random.randint(0, train_batch)
-            samples, _ = generator.generate_step(sess, positive_samples[no * BATCH_SIZE :(no +1) * BATCH_SIZE])
-            rewards = rollout.get_reward(sess, samples, 16, discriminator)
+            samples, _ = generator.generate_step(sess, positive_samples[no * batch_size :(no +1) * batch_size])
+            rewards = rollout.get_reward(sess, samples, g_num_search, discriminator)
             generator.update_step(sess, samples, rewards)
         # Test
-        if epoch % 5 == 0 or epoch == TOTAL_BATCH - 1:
-            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch, input_length, adjacency_matrix)
+        if epoch % 5 == 0 or epoch == num_epochs - 1:
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix)
             print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
 
         # Update roll-out parameters
         rollout.update_params()
 
         # Train the discriminator
-        train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, train_batch, positive_samples,
-                           dis_data_loader, dis_dropout_keep_prob)
+        train_discrimintor(sess, generator, discriminator, d_num_epochs, batch_size, train_batch, positive_samples,
+                           dis_data_loader, d_dropout_prob)
 
 
 if __name__ == '__main__':

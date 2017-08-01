@@ -447,6 +447,56 @@ def parse_args():
 	return parser.parse_args()
 
 
+def parse_args_new():
+	parser = argparse.ArgumentParser(description="Run ComEmbed.")
+
+	parser.add_argument('-graph_file', nargs='?', default='graph2.txt',
+						help='Graph path')
+	parser.add_argument('-data_file', nargs='?', default='diffusion2.pkl',
+						help='Input diffusion data')
+	parser.add_argument('-seq_length', type=int, default=10,
+						help='Length of diffusion instance for generator. Default is 10.')
+	parser.add_argument('-num_epochs', type=int, default=200,
+						help='Number of iteration for gan. Default is 200.')
+	parser.add_argument('-num_node', type=int, default=755,
+						help='Number of nodes. Default is 725.')
+	parser.add_argument('-batch_size', type=int, default=25,
+						help='Size of a minibatch sample. Default is 25.')
+	parser.add_argument('-train_percent', type=float, default=0.5,
+						help='Train percent of sequence length. Default is 0.5.')
+	parser.add_argument('-num_train_sample', type=int, default=225,
+						help='Number of a all samples for training. Default is 225.')
+	parser.add_argument('-num_test_sample', type=int, default=50,
+						help='Number of a all samples for testing. Default is 50.')
+
+	parser.add_argument('-g_dim_emb', type=int, default=32,
+						help='Dimension of embedding in generator. Default is 32.')
+	parser.add_argument('-g_hidden_size', type=int, default=32,
+						help='Number of neurons at hidden layer. Default is 64.')
+	parser.add_argument('-g_epochs', type=int, default=1,
+						help='Number of iteration for generator. Default is 1.')
+	parser.add_argument('-g_pretrain_epochs', type=int, default=100,
+						help='Number of iteration for pre-train generator. Default is 100.')
+	parser.add_argument('-g_num_search', type=int, default=15,
+						help='Number of monte Carlo search for generator. Default is 15.')
+	parser.add_argument('-g_update_rate', type=float, default=0.8,
+						help='Update rate of for generator. Default is 0.8.')
+
+
+	parser.add_argument('-d_dim_emb', type=int, default=64,
+						help='Dimension of embedding in discriminator. Default is 64.')
+	parser.add_argument('-d_epochs', type=int, default=5,
+						help='Number of iteration for discriminator. Default is 5.')
+	parser.add_argument('-d_pretrain_epochs', type=int, default=50,
+						help='Number of iteration for pre-train discriminator. Default is 50.')
+	parser.add_argument('-d_dropout_prob', type=float, default=0.75,
+						help='Probability of dropout for discriminator. Default is 0.75.')
+	parser.add_argument('-d_reg_lambda', type=float, default=0.2,
+						help='Lambda in regression for discriminator. Default is 0.2.')
+
+	return parser.parse_args()
+
+
 def main():
     args = parse_args()
     preprocess_data(args)
