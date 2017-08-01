@@ -490,7 +490,8 @@ class ROLLOUT(object):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
             log_prob = tf.log(tf.nn.softmax(o_t))
-            next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
+            # next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
+            next_token = tf.cast(tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
             x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
             gen_x = gen_x.write(i, next_token)  # indices, batch_size
             temp = tf.nn.embedding_lookup(self.adj, next_token)

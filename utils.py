@@ -224,9 +224,9 @@ def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion
 
 def preprocess_data(args):
     """preprocess data and save data into file"""
-    max_node_num = 100000
-    num_node = 100
-    min_length = 10
+    max_node_num = args.num_sub_graph_node
+    num_node = args.num_seed
+    min_length = args.min_length
     node2id = read_map(max_node_num)
     graph = read_network(max_node_num)
     m_info, m_retweet = read_diffusion(max_node_num, min_length)
@@ -493,6 +493,13 @@ def parse_args_new():
 						help='Probability of dropout for discriminator. Default is 0.75.')
 	parser.add_argument('-d_reg_lambda', type=float, default=0.2,
 						help='Lambda in regression for discriminator. Default is 0.2.')
+
+	parser.add_argument('-num_seed', type=int, default=100,
+						help='Number of seed for obtain graph and diffusion instances. Default is 100.')
+	parser.add_argument('-num_sub_graph_node', type=int, default=100000,
+						help='Number of node in the initial sub graph.  Default is 100000.')
+	parser.add_argument('-min_length', type=int, default=10,
+						help='Minimum length of diffusion instances. Default is 10.')
 
 	return parser.parse_args()
 
