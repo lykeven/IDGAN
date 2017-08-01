@@ -257,20 +257,26 @@ def get_diffusion_matrix(diff_batch, num_node=181):
     return diff_data
 
 
-def train_next_batch(batch_size, input_size=181):
+def train_next_batch(batch_size, input_size=181, hard=False):
     global train_pos, all_data
     if train_pos + batch_size > all_data["train"].shape[0]:
         train_pos = 0
-    batch_data = get_diffusion_matrix(all_data["train"][train_pos:train_pos + batch_size], input_size)
+    if hard is False:
+        batch_data = get_diffusion_matrix(all_data["train"][train_pos:train_pos + batch_size], input_size)
+    else:
+        batch_data = all_data["train"][train_pos:train_pos + batch_size]
     train_pos += batch_size
     return batch_data
 
 
-def test_next_batch(batch_size, input_size=181):
+def test_next_batch(batch_size, input_size=181, hard=False):
     global test_pos, all_data
     if test_pos + batch_size > all_data["test"].shape[0]:
         test_pos = 0
-    batch_data = get_diffusion_matrix(all_data["test"][test_pos:test_pos + batch_size], input_size)
+    if hard is False:
+        batch_data = get_diffusion_matrix(all_data["test"][test_pos:test_pos + batch_size], input_size)
+    else:
+        batch_data = all_data["test"][test_pos:test_pos + batch_size]
     test_pos += batch_size
     return batch_data
 

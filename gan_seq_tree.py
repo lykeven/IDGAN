@@ -167,8 +167,15 @@ class Generator(object):
             correct_number = tf.cast(tf.sets.set_size(intersection), tf.float32)
             total_number = tf.cast(tf.sets.set_size(union), tf.float32)
             return tf.reduce_mean(correct_number * 1.0 / total_number)
+
         ground_truth = self.x[:, self.sequence_length / 2:]
         self.accuracy = compute_accuracy(self.gen_seq, ground_truth)
+
+        self.train_loss = -tf.reduce_sum(
+            tf.one_hot(tf.to_int32(tf.reshape(self.x, [-1])), self.num_emb, 1.0, 0.0) * tf.log(
+                tf.clip_by_value(tf.reshape(self.g_predictions_2, [-1, self.num_emb]), 1e-20, 1.0)
+            )
+        ) / (self.sequence_length * self.batch_size)
 
 
     def update(self,):
@@ -197,8 +204,9 @@ class Generator(object):
 
     def get_accuracy(self, sess, x):
         feed_dict = {self.x: x, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
-        output = sess.run(self.accuracy, feed_dict=feed_dict)
-        return output
+        accuracy, loss = sess.run([self.accuracy, self.train_loss], feed_dict=feed_dict)
+        return accuracy, loss
+
 
     def update_step(self, sess, x, reward):
         feed_dict = {self.x: x, self.rewards:reward, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
@@ -672,37 +680,6 @@ class ROLLOUT(object):
         self.g_output_unit = self.update_output_unit()
 
 
-
-class Gen_Data_loader():
-    def __init__(self, batch_size, seq_length):
-        self.batch_size = batch_size
-        self.seq_length = seq_length
-        self.token_stream = []
-
-    def create_batches(self, data_file):
-        self.token_stream = []
-        with open(data_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                line = line.split()
-                parse_line = [int(x) for x in line]
-                if len(parse_line) == self.seq_length:
-                    self.token_stream.append(parse_line)
-
-        self.num_batch = int(len(self.token_stream) / self.batch_size)
-        self.token_stream = self.token_stream[:self.num_batch * self.batch_size]
-        self.sequence_batch = np.split(np.array(self.token_stream), self.num_batch, 0)
-        self.pointer = 0
-
-    def next_batch(self):
-        ret = self.sequence_batch[self.pointer]
-        self.pointer = (self.pointer + 1) % self.num_batch
-        return ret
-
-    def reset_pointer(self):
-        self.pointer = 0
-
-
 class Dis_dataloader():
     def __init__(self, batch_size, seq_length):
         self.batch_size = batch_size
@@ -710,23 +687,7 @@ class Dis_dataloader():
         self.sentences = np.array([])
         self.labels = np.array([])
 
-    def load_train_data(self, positive_file, negative_file):
-        # Load data
-        positive_examples = []
-        negative_examples = []
-        with open(positive_file)as fin:
-            for line in fin:
-                line = line.strip()
-                line = line.split()
-                parse_line = [int(x) for x in line]
-                positive_examples.append(parse_line)
-        with open(negative_file)as fin:
-            for line in fin:
-                line = line.strip()
-                line = line.split()
-                parse_line = [int(x) for x in line]
-                if len(parse_line) == self.seq_length:
-                    negative_examples.append(parse_line)
+    def load_train_data(self, positive_examples, negative_examples):
         self.sentences = np.array(positive_examples + negative_examples)
 
         # Generate labels
@@ -759,57 +720,43 @@ class Dis_dataloader():
 
 
 
-def generate_samples(sess, trainable_model, batch_size, generated_num, output_file, is_real=False, data_file="diffusion2.pkl", is_test=False):
+def generate_samples(sess, trainable_model, batch_size, generated_num, real_samples):
     # Generate Samples
     generated_samples = []
-    if is_real is True:
-        generated_samples = utils.feed_data_all(data_file, generated_num, is_test)
-    else:
-        real_samples = utils.feed_data_all(data_file, generated_num, False)
-        for i in range(int(generated_num / batch_size)):
-            generated_samples.extend(trainable_model.generate_step(sess, real_samples[i * batch_size: (i + 1) * batch_size]))
-
-    with open(output_file, 'w') as fout:
-        for poem in generated_samples:
-            buffer = ' '.join([str(x) for x in poem]) + '\n'
-            fout.write(buffer)
+    for i in range(int(generated_num / batch_size)):
+        generated_samples.extend(trainable_model.generate_step(sess, real_samples[i * batch_size: (i + 1) * batch_size]))
+    return generated_samples
 
 
-def target_loss(sess, target_lstm, data_loader):
-    # target_loss means the oracle negative log-likelihood tested with the oracle model "target_lstm"
-    # For more details, please see the Section 4 in https://arxiv.org/abs/1609.05473
-    nll = []
-    data_loader.reset_pointer()
-
-    for it in xrange(data_loader.num_batch):
-        batch = data_loader.next_batch()
-        g_loss = sess.run(target_lstm.pretrain_loss, {target_lstm.x: batch})
-        nll.append(g_loss)
-
-    return np.mean(nll)
-
-
-def pre_train_epoch(sess, trainable_model, data_loader):
+def pre_train_epoch(sess, trainable_model, batch_size, num_batch):
     # Pre-train the generator using MLE for one epoch
     supervised_g_losses = []
-    data_loader.reset_pointer()
-
-    for it in xrange(data_loader.num_batch):
-        batch = data_loader.next_batch()
+    for it in xrange(num_batch):
+        batch = utils.train_next_batch(batch_size, hard=True)
         _, g_loss = trainable_model.pretrain_step(sess, batch)
         supervised_g_losses.append(g_loss)
-
     return np.mean(supervised_g_losses)
 
 
-def test_accuracy_epoch(sess, trainable_model, data_loader, test_epochs=2):
-    accuracy_list = []
-    data_loader.reset_pointer()
-    for it in xrange(test_epochs):
-        batch = data_loader.next_batch()
-        accuracy = trainable_model.get_accuracy(sess, batch)
-        accuracy_list.append(accuracy)
-    print("Test accuracy : %.5f" % (np.mean(accuracy_list)))
+def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch=2):
+    accuracy_list = [0.0] * num_batch
+    loss_list = [0.0] * num_batch
+    for i in xrange(num_batch):
+        batch = utils.test_next_batch(batch_size, hard=True)
+        accuracy_list[i], loss_list[i] = trainable_model.get_accuracy(sess, batch)
+    return np.mean(accuracy_list), np.mean(loss_list)
+
+
+def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, generated_num, positive_samples, dis_data_loader, dis_dropout_keep_prob = 0.75):
+    for _ in range(epoch_num):
+        negative_samples = generate_samples(sess, generator, batch_size, generated_num, positive_samples)
+        dis_data_loader.load_train_data(positive_samples, negative_samples)
+        for _ in range(3):
+            dis_data_loader.reset_pointer()
+            for it in xrange(dis_data_loader.num_batch):
+                x_batch, y_batch = dis_data_loader.next_batch()
+                feed = {discriminator.input_x: x_batch, discriminator.input_y: y_batch, discriminator.dropout_keep_prob: dis_dropout_keep_prob}
+                _ = sess.run(discriminator.train_op, feed)
 
 
 def main():
@@ -823,18 +770,21 @@ def main():
 
     TOTAL_BATCH = 200
     PRE_EPOCH_NUM = 10  # supervise (maximum likelihood estimation) epochs
-    PRE_EPOCH_NUM_D = 1  #
     SEED = 88
     BATCH_SIZE = 25
     vocab_size = 755
     generated_num = 225
     generated_num_test = 50
 
+    train_batch = int(generated_num / BATCH_SIZE)
+    test_batch = int(generated_num_test / BATCH_SIZE)
+
 
 
     #########################################################################################
     #  Discriminator  Hyper-parameters
     #########################################################################################
+    PRE_EPOCH_NUM_D = 1
     dis_embedding_dim = 64
     dis_filter_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     dis_num_filters = [100, 200, 200, 200, 200, 100, 100, 100, 100, 100]
@@ -842,26 +792,14 @@ def main():
     dis_l2_reg_lambda = 0.2
 
     #########################################################################################
-    #  Basic Training Parameters
+    #  File Parameters
     #########################################################################################
     origin_data_file = 'diffusion2.pkl'
     graph_file = 'graph2.txt'
-    positive_file = 'save/real_data.txt'
-    negative_file = 'save/generator_sample.txt'
-    test_file = 'save/test_data.txt'
-    eval_file = 'save/eval_file.txt'
-    target_params_file = 'save/target_params.pkl'
-    log_file = 'save/experiment-log.txt'
-
 
     random.seed(SEED)
     np.random.seed(SEED)
     assert START_TOKEN == 0
-
-    gen_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH)
-    likelihood_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH) # For testing
-    test_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH) # For testing
-    dis_data_loader = Dis_dataloader(BATCH_SIZE, SEQ_LENGTH)
 
     generator = Generator(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN, graph_file=graph_file)
     discriminator = Discriminator(sequence_length=SEQ_LENGTH, num_classes=2, vocab_size=vocab_size, embedding_size=dis_embedding_dim,
@@ -872,89 +810,47 @@ def main():
     sess = tf.Session(config=config)
     sess.run(tf.global_variables_initializer())
 
-    # First, use the oracle model to provide the positive examples, which are sampled from the oracle data distribution
-    generate_samples(sess, generator, BATCH_SIZE, generated_num, positive_file, True, origin_data_file)
-    gen_data_loader.create_batches(positive_file)
+    utils.prepare_data(origin_data_file)
+    dis_data_loader = Dis_dataloader(BATCH_SIZE, SEQ_LENGTH)
+    positive_samples = utils.feed_data_all(origin_data_file, generated_num)
 
-    # save test data into test_file
-    generate_samples(sess, generator, BATCH_SIZE, generated_num_test, test_file, True, origin_data_file, True)
-    test_data_loader.create_batches(test_file)
 
-    log = open(log_file, 'w')
     #  pre-train generator
     print 'Start pre-training...'
-    log.write('pre-training...\n')
     for epoch in xrange(PRE_EPOCH_NUM):
-        loss = pre_train_epoch(sess, generator, gen_data_loader)
+        loss = pre_train_epoch(sess, generator, BATCH_SIZE, int(generated_num / BATCH_SIZE))
+        print 'pre-train epoch:%d loss:%.3f' % (epoch, loss)
         if epoch % 5 == 0:
-            generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
-            likelihood_data_loader.create_batches(eval_file)
-            test_loss = target_loss(sess, generator, likelihood_data_loader)
-            print 'pre-train epoch ', epoch, 'test_loss ', test_loss
-            buffer = 'epoch:\t'+ str(epoch) + '\tnll:\t' + str(test_loss) + '\n'
-            log.write(buffer)
-            test_accuracy_epoch(sess, generator, test_data_loader)
+            accuracy, test_loss = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch)
+            print 'pre-train epoch:%d loss:%.5f jaccard:%.5f' % (epoch, test_loss, accuracy)
 
     print 'Start pre-training discriminator...'
     # Train 3 epoch on the generated data and do this for 50 times
-    for _ in range(PRE_EPOCH_NUM_D):
-        generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
-        dis_data_loader.load_train_data(positive_file, negative_file)
-        for _ in range(3):
-            dis_data_loader.reset_pointer()
-            for it in xrange(dis_data_loader.num_batch):
-                x_batch, y_batch = dis_data_loader.next_batch()
-                feed = {
-                    discriminator.input_x: x_batch,
-                    discriminator.input_y: y_batch,
-                    discriminator.dropout_keep_prob: dis_dropout_keep_prob
-                }
-                _ = sess.run(discriminator.train_op, feed)
+    train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, generated_num, positive_samples,
+                           dis_data_loader, dis_dropout_keep_prob=0.75)
 
     rollout = ROLLOUT(generator, 0.8)
 
     print '#########################################################################'
     print 'Start Adversarial Training...'
-    log.write('adversarial training...\n')
-    real_samples = utils.feed_data_all(origin_data_file, generated_num, False)
-    for total_batch in range(TOTAL_BATCH):
+    for epoch in range(TOTAL_BATCH):
         # Train the generator for one step
         for it in range(1):
             no = np.random.randint(0, generated_num / BATCH_SIZE)
-            samples = generator.generate_step(sess, real_samples[no * BATCH_SIZE :(no +1) * BATCH_SIZE])
+            samples = generator.generate_step(sess, positive_samples[no * BATCH_SIZE :(no +1) * BATCH_SIZE])
             rewards = rollout.get_reward(sess, samples, 16, discriminator)
             generator.update_step(sess, samples, rewards)
-
         # Test
-        if total_batch % 5 == 0 or total_batch == TOTAL_BATCH - 1:
-            generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
-            likelihood_data_loader.create_batches(eval_file)
-            test_loss = target_loss(sess, generator, likelihood_data_loader)
-            buffer = 'epoch:\t' + str(total_batch) + '\tnll:\t' + str(test_loss) + '\n'
-            print 'total_batch: ', total_batch, 'test_loss: ', test_loss
-            log.write(buffer)
-            test_accuracy_epoch(sess, generator, test_data_loader)
+        if epoch % 5 == 0 or epoch == TOTAL_BATCH - 1:
+            accuracy, test_loss = test_accuracy_epoch(sess, generator, BATCH_SIZE, test_batch)
+            print 'train epoch:%d loss:%.3f jaccard:%.3f' % (epoch, test_loss, accuracy)
 
         # Update roll-out parameters
         rollout.update_params()
 
         # Train the discriminator
-        for _ in range(5):
-            generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
-            dis_data_loader.load_train_data(positive_file, negative_file)
-
-            for _ in range(3):
-                dis_data_loader.reset_pointer()
-                for it in xrange(dis_data_loader.num_batch):
-                    x_batch, y_batch = dis_data_loader.next_batch()
-                    feed = {
-                        discriminator.input_x: x_batch,
-                        discriminator.input_y: y_batch,
-                        discriminator.dropout_keep_prob: dis_dropout_keep_prob
-                    }
-                    _ = sess.run(discriminator.train_op, feed)
-
-    log.close()
+        train_discrimintor(sess, generator, discriminator, PRE_EPOCH_NUM_D, BATCH_SIZE, generated_num, positive_samples,
+                           dis_data_loader, dis_dropout_keep_prob=0.75)
 
 
 if __name__ == '__main__':

@@ -201,7 +201,9 @@ class GAN_RNN_GCN():
                 print("Iter %d, g_loss = %.5f, d_loss = %.5f, accuracy = %.5f" % (i, g_loss, d_loss, accuracy))
 
         # test performance
-        g_loss_list = d_loss_list = accuracy_list = [0.0] * self.num_epochs_test
+        g_loss_list = [0.0] * self.num_epochs_test
+        d_loss_list = [0.0] * self.num_epochs_test
+        accuracy_list = [0.0] * self.num_epochs_test
         for i in range(self.num_epochs_test):
             batch_z, batch_x, batch_z_ = utils.feed_data(self.g_batch_size, self.g_input_step, self.g_input_size, is_train=False)
             feed_dict = {self.z: batch_z, self.x: batch_x, self.z_t: batch_z_, self.lap: self.lap_list}
