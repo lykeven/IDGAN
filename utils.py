@@ -143,12 +143,13 @@ def extract_sub_graph(graph, node2id, m_info, m_retweet, num_node=100, length=30
                 start_node = diff_node_list[j][0]
                 diffusion_set = [start_node]
                 start_neibor = dict()
-                for v, u in graph.out_edges(start_node):
+                for u, v in graph.in_edges(start_node):
                     start_neibor[u] = True
                 for i in range(j+1, len(diff_node_list)):
-                    if diff_node_list[i][0] in start_neibor and diff_node_list[i][0] not in diffusion_set:
-                        diffusion_set.append(diff_node_list[i][0])
-                        for v, u in graph.out_edges(diff_node_list[i][0]):
+                    node = diff_node_list[i][0]
+                    if node in start_neibor and node not in diffusion_set:
+                        diffusion_set.append(node)
+                        for u, v in graph.in_edges(node):
                             start_neibor[u] = True
                     if len(diffusion_set) == length: break
                 if len(diffusion_set) == length:
@@ -222,6 +223,31 @@ def save_data(subgraph, sub_retweet, features, graph_file="graph.txt", diffusion
     print("diffusion write done with %d diffusion path" % (len(sub_retweet)))
 
 
+def check_instance(negative_samples, adjacency_matrix, batch_size):
+    valid =[False] * batch_size
+    for i in range(len(negative_samples)):
+        neighbor_indictor = adjacency_matrix[negative_samples[i][0]]
+        valid_indictor = True
+        for j in range(1, len(negative_samples[0])):
+            neighbor_set = set(np.where(neighbor_indictor > 0)[0])
+            if negative_samples[i][j] not in neighbor_set:
+                valid_indictor = False
+                break
+            neighbor_indictor += adjacency_matrix[negative_samples[i][j]]
+        valid[i] = valid_indictor
+    if sum(valid) != len(valid):
+        print '%.3f%% samples are not valid' % (100 - sum(valid) * 100.0 / len(valid))
+    else:
+        print 'all samples are valid'
+
+
+def check_data(graph_file, data_file, num_sample):
+    graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
+    adjacency_matrix = np.asarray(nx.adjacency_matrix(graph).todense()).transpose()
+    positive_samples = feed_data_all(data_file, num_sample)
+    check_instance(positive_samples, adjacency_matrix, len(positive_samples))
+
+
 def preprocess_data(args):
     """preprocess data and save data into file"""
     max_node_num = args.num_sub_graph_node
@@ -233,6 +259,8 @@ def preprocess_data(args):
     u_info = read_feature(node2id, max_node_num)
     sub_graph, sub_retweet = extract_sub_graph(graph, node2id, m_info, m_retweet, num_node, min_length, single=False, ego=True)
     save_data(sub_graph, sub_retweet, u_info, args.graph_file, args.data_file, min_length)
+
+    check_data(args.graph_file, args.data_file, args.num_train_sample)
 
     # show_graph(graph_file)
     # prepare_data()
@@ -477,6 +505,8 @@ def parse_args_new():
 						help='Number of iteration for generator. Default is 1.')
 	parser.add_argument('-g_pretrain_epochs', type=int, default=100,
 						help='Number of iteration for pre-train generator. Default is 100.')
+	parser.add_argument('-g_num_expend', type=int, default=10,
+						help='Number of expend for evaluating performance. Default is 10.')
 	parser.add_argument('-g_num_search', type=int, default=15,
 						help='Number of monte Carlo search for generator. Default is 15.')
 	parser.add_argument('-g_update_rate', type=float, default=0.8,

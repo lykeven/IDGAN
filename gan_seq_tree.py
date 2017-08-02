@@ -109,7 +109,9 @@ class Generator(object):
         def _pretrain_recurrence_2(i, x_t, h_tm1, g_predictions, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)
             o_t = self.g_output_unit(h_t)
-            g_predictions = g_predictions.write(i, tf.nn.softmax(o_t))  # batch x vocab_size
+            prob = tf.nn.softmax(o_t)  *  tf.cast(neighbor, tf.float32)
+            prob = tf.nn.l2_normalize(prob, dim=1)
+            g_predictions = g_predictions.write(i, prob)  # batch x vocab_size
             x_tp1 = ta_emb_x.read(i)
             x_ind = ta_ind_x.read(i)
             # temp = tf.gather_nd(self.adj, x_ind)
@@ -119,11 +121,13 @@ class Generator(object):
 
         def _g_recurrence_2(i, x_t, h_tm1, gen_o, gen_x, g_predictions, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
-            o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            g_predictions = g_predictions.write(i + self.input_length, tf.nn.softmax(o_t))  # batch x vocab_size
-            log_prob = tf.log(tf.nn.softmax(o_t))
+            o_t = self.g_output_unit(h_t)
+            prob = tf.nn.softmax(o_t)  *  tf.cast(neighbor, tf.float32)
+            prob = tf.nn.l2_normalize(prob, dim=1)
+            g_predictions = g_predictions.write(i + self.input_length, prob)  # batch x vocab_size
+            log_prob = tf.log(prob)
             next_token = tf.cast(
-                tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
+                tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
             x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
             gen_o = gen_o.write(i, tf.reduce_sum(tf.multiply(tf.one_hot(next_token, self.num_emb, 1.0, 0.0),
                                                              tf.nn.softmax(o_t)), 1))  # [batch_size] , prob
@@ -356,10 +360,11 @@ class ROLLOUT(object):
         # When current index i >= given_num, start roll-out, use the output as time step t as the input at time step t+1
         def _g_recurrence_2(i, x_t, h_tm1, given_num, gen_x, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
-            o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            log_prob = tf.log(tf.nn.softmax(o_t))
-            # next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
-            next_token = tf.cast(tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
+            o_t = self.g_output_unit(h_t)
+            prob = tf.nn.softmax(o_t)  *  tf.cast(neighbor, tf.float32)
+            prob = tf.nn.l2_normalize(prob, dim=1)
+            log_prob = tf.log(prob)
+            next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
             x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
             gen_x = gen_x.write(i, next_token)  # indices, batch_size
             temp = tf.nn.embedding_lookup(self.adj, next_token)
@@ -766,19 +771,19 @@ def candidate_measure(positive_samples, negative_samples, g_prediction, adjacenc
     return correct * 1.0 / batch_size / (sequence_length - input_length)
 
 
-def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch, input_length, adjacency_matrix):
+def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch, input_length, adjacency_matrix, num_expend=5):
     accuracy_list = [0.0] * num_batch
     loss_list = [0.0] * num_batch
     p_num_list = [0.0] * num_batch
     n_num_list = [0.0] * num_batch
     for i in xrange(num_batch):
-        batch = utils.test_next_batch(batch_size, hard=True)
+        batch = utils.train_next_batch(batch_size, hard=True)
         neg_batch, g_prediction = trainable_model.generate_step(sess, batch)
-        check_instance(neg_batch, adjacency_matrix, batch_size)
+        # utils.check_instance(neg_batch, adjacency_matrix, batch_size)
         accuracy_list[i], loss_list[i] = trainable_model.get_accuracy(sess, batch)
 
-        p_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=5,prob=False)
-        n_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=5,prob=True)
+        p_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=num_expend,prob=False)
+        n_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=num_expend,prob=True)
 
     return np.mean(accuracy_list), np.mean(loss_list), np.mean(p_num_list), np.mean(n_num_list)
 
@@ -794,22 +799,6 @@ def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, tr
                 feed = {discriminator.input_x: x_batch, discriminator.input_y: y_batch, discriminator.dropout_keep_prob: dis_dropout_keep_prob}
                 _ = sess.run(discriminator.train_op, feed)
 
-
-def check_instance(negative_samples, adjacency_matrix, batch_size):
-    valid =[False] * batch_size
-    for i in range(negative_samples.shape[0]):
-        neighbor_indictor = adjacency_matrix[0]
-        valid_indictor = True
-        for j in range(1, negative_samples.shape[1]):
-            neighbor_set = set(np.where(neighbor_indictor > 0)[0])
-            if negative_samples[i][j] not in neighbor_set:
-                valid_indictor = False
-                break
-            neighbor_indictor += adjacency_matrix[negative_samples[i][j]]
-        valid[i] = valid_indictor
-    print valid
-    if sum(valid) != len(valid):
-        print 'These generated samples are not valid'
 
 
 def main():
@@ -833,6 +822,7 @@ def main():
     train_percent = args.train_percent
     g_num_search = args.g_num_search
     g_update_rate = args.g_update_rate
+    g_num_expend = args.g_num_expend
 
     #  Discriminator  Hyper-parameters
     d_num_epochs = args.d_epochs
@@ -883,7 +873,7 @@ def main():
         loss = pre_train_epoch(sess, generator, batch_size, train_batch)
         print 'pre-train epoch:%d loss:%.3f' % (epoch, loss)
         if epoch % 5 == 0:
-            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix)
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix, g_num_expend)
             print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
 
     print 'Start pre-training discriminator...'
@@ -904,7 +894,7 @@ def main():
             generator.update_step(sess, samples, rewards)
         # Test
         if epoch % 5 == 0 or epoch == num_epochs - 1:
-            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix)
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix, g_num_expend)
             print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
 
         # Update roll-out parameters
