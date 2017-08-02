@@ -505,7 +505,7 @@ def parse_args_new():
 
 
 def main():
-    args = parse_args()
+    args = parse_args_new()
     preprocess_data(args)
 
 if __name__ == '__main__':

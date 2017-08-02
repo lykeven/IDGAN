@@ -120,7 +120,7 @@ class Generator(object):
         def _g_recurrence_2(i, x_t, h_tm1, gen_o, gen_x, g_predictions, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            g_predictions = g_predictions.write(i + self.input_length, tf.nn.softmax(o_t))  # batch x vocab_size
+            g_predictions = g_predictions.write(i + self.input_length, tf.nnqq.softmax(o_t))  # batch x vocab_size
             log_prob = tf.log(tf.nn.softmax(o_t))
             next_token = tf.cast(
                 tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
@@ -299,139 +299,6 @@ class Generator(object):
         return tf.train.AdamOptimizer(*args, **kwargs)
 
 
-def linear(input_, output_size, scope=None):
-    '''
-    Linear map: output[k] = sum_i(Matrix[k, i] * input_[i] ) + Bias[k]
-    Args:
-    input_: a tensor or a list of 2D, batch x n, Tensors.
-    output_size: int, second dimension of W[i].
-    scope: VariableScope for the created subgraph; defaults to "Linear".
-  Returns:
-    A 2D Tensor with shape [batch x output_size] equal to
-    sum_i(input_[i] * W[i]), where W[i]s are newly created matrices.
-  Raises:
-    ValueError: if some of the arguments has unspecified or wrong shape.
-  '''
-
-    shape = input_.get_shape().as_list()
-    if len(shape) != 2:
-        raise ValueError("Linear is expecting 2D arguments: %s" % str(shape))
-    if not shape[1]:
-        raise ValueError("Linear expects shape[1] of arguments: %s" % str(shape))
-    input_size = shape[1]
-
-    # Now the computation.
-    with tf.variable_scope(scope or "SimpleLinear"):
-        matrix = tf.get_variable("Matrix", [output_size, input_size], dtype=input_.dtype)
-        bias_term = tf.get_variable("Bias", [output_size], dtype=input_.dtype)
-
-    return tf.matmul(input_, tf.transpose(matrix)) + bias_term
-
-
-def highway(input_, size, num_layers=1, bias=-2.0, f=tf.nn.relu, scope='Highway'):
-    """Highway Network (cf. http://arxiv.org/abs/1505.00387).
-    t = sigmoid(Wy + b)
-    z = t * g(Wy + b) + (1 - t) * y
-    where g is nonlinearity, t is transform gate, and (1 - t) is carry gate.
-    """
-
-    with tf.variable_scope(scope):
-        for idx in range(num_layers):
-            g = f(linear(input_, size, scope='highway_lin_%d' % idx))
-
-            t = tf.sigmoid(linear(input_, size, scope='highway_gate_%d' % idx) + bias)
-
-            output = t * g + (1. - t) * input_
-            input_ = output
-
-    return output
-
-
-class Discriminator(object):
-    """
-    A CNN for text classification.
-    Uses an embedding layer, followed by a convolutional, max-pooling and softmax layer.
-    """
-
-    def __init__(
-            self, sequence_length, num_classes, vocab_size,
-            embedding_size, filter_sizes, num_filters, l2_reg_lambda=0.0):
-        # Placeholders for input, output and dropout
-        self.input_x = tf.placeholder(tf.int32, [None, sequence_length], name="input_x")
-        self.input_y = tf.placeholder(tf.float32, [None, num_classes], name="input_y")
-        self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
-
-        # Keeping track of l2 regularization loss (optional)
-        l2_loss = tf.constant(0.0)
-
-        with tf.variable_scope('discriminator'):
-            # Embedding layer
-            with tf.device('/cpu:0'), tf.name_scope("embedding"):
-                self.W = tf.Variable(
-                    tf.random_uniform([vocab_size, embedding_size], -1.0, 1.0),
-                    name="W")
-                self.embedded_chars = tf.nn.embedding_lookup(self.W, self.input_x)
-                self.embedded_chars_expanded = tf.expand_dims(self.embedded_chars, -1)
-
-            # Create a convolution + maxpool layer for each filter size
-            pooled_outputs = []
-            for filter_size, num_filter in zip(filter_sizes, num_filters):
-                with tf.name_scope("conv-maxpool-%s" % filter_size):
-                    # Convolution Layer
-                    filter_shape = [filter_size, embedding_size, 1, num_filter]
-                    W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name="W")
-                    b = tf.Variable(tf.constant(0.1, shape=[num_filter]), name="b")
-                    conv = tf.nn.conv2d(
-                        self.embedded_chars_expanded,
-                        W,
-                        strides=[1, 1, 1, 1],
-                        padding="VALID",
-                        name="conv")
-                    # Apply nonlinearity
-                    h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu")
-                    # Maxpooling over the outputs
-                    pooled = tf.nn.max_pool(
-                        h,
-                        ksize=[1, sequence_length - filter_size + 1, 1, 1],
-                        strides=[1, 1, 1, 1],
-                        padding='VALID',
-                        name="pool")
-                    pooled_outputs.append(pooled)
-
-            # Combine all the pooled features
-            num_filters_total = sum(num_filters)
-            self.h_pool = tf.concat(pooled_outputs, 3)
-            self.h_pool_flat = tf.reshape(self.h_pool, [-1, num_filters_total])
-
-            # Add highway
-            with tf.name_scope("highway"):
-                self.h_highway = highway(self.h_pool_flat, self.h_pool_flat.get_shape()[1], 1, 0)
-
-            # Add dropout
-            with tf.name_scope("dropout"):
-                self.h_drop = tf.nn.dropout(self.h_highway, self.dropout_keep_prob)
-
-            # Final (unnormalized) scores and predictions
-            with tf.name_scope("output"):
-                W = tf.Variable(tf.truncated_normal([num_filters_total, num_classes], stddev=0.1), name="W")
-                b = tf.Variable(tf.constant(0.1, shape=[num_classes]), name="b")
-                l2_loss += tf.nn.l2_loss(W)
-                l2_loss += tf.nn.l2_loss(b)
-                self.scores = tf.nn.xw_plus_b(self.h_drop, W, b, name="scores")
-                self.ypred_for_auc = tf.nn.softmax(self.scores)
-                self.predictions = tf.argmax(self.scores, 1, name="predictions")
-
-            # CalculateMean cross-entropy loss
-            with tf.name_scope("loss"):
-                losses = tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.input_y)
-                self.loss = tf.reduce_mean(losses) + l2_reg_lambda * l2_loss
-
-        self.params = [param for param in tf.trainable_variables() if 'discriminator' in param.name]
-        d_optimizer = tf.train.AdamOptimizer(1e-4)
-        grads_and_vars = d_optimizer.compute_gradients(self.loss, self.params, aggregation_method=2)
-        self.train_op = d_optimizer.apply_gradients(grads_and_vars)
-
-
 
 class ROLLOUT(object):
     def __init__(self, lstm, update_rate):
@@ -480,8 +347,9 @@ class ROLLOUT(object):
         def _g_recurrence_1(i, x_t, h_tm1, given_num, gen_x, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             x_tp1 = ta_emb_x.read(i)
-            gen_x = gen_x.write(i, ta_x.read(i))
-            temp = tf.nn.embedding_lookup(self.adj, ta_x.read(i))
+            next_token = ta_x.read(i)
+            gen_x = gen_x.write(i, next_token)
+            temp = tf.nn.embedding_lookup(self.adj, next_token)
             neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
             return i + 1, x_tp1, h_t, given_num, gen_x, neighbor
 
@@ -499,7 +367,7 @@ class ROLLOUT(object):
 
             return i + 1, x_tp1, h_t, given_num, gen_x, neighbor
 
-        i, x_t, h_tm1, given_num, self.gen_x, new_neighbor = control_flow_ops.while_loop(
+        i, x_t, h_tm1, given_num, gen_x, new_neighbor = control_flow_ops.while_loop(
             cond=lambda i, _1, _2, given_num, _4, _5: i < given_num,
             body=_g_recurrence_1,
             loop_vars=(tf.constant(0, dtype=tf.int32),
@@ -508,7 +376,7 @@ class ROLLOUT(object):
         _, _, _, _, self.gen_x, new_neighbor = control_flow_ops.while_loop(
             cond=lambda i, _1, _2, _3, _4, _5: i < self.sequence_length,
             body=_g_recurrence_2,
-            loop_vars=(i, x_t, h_tm1, given_num, self.gen_x, new_neighbor))
+            loop_vars=(i, x_t, h_tm1, given_num, gen_x, new_neighbor))
 
         self.gen_x = self.gen_x.stack()  # seq_length x batch_size
         self.gen_x = tf.transpose(self.gen_x, perm=[1, 0])  # batch_size x seq_length
@@ -682,6 +550,142 @@ class ROLLOUT(object):
         self.g_output_unit = self.update_output_unit()
 
 
+
+def linear(input_, output_size, scope=None):
+    '''
+    Linear map: output[k] = sum_i(Matrix[k, i] * input_[i] ) + Bias[k]
+    Args:
+    input_: a tensor or a list of 2D, batch x n, Tensors.
+    output_size: int, second dimension of W[i].
+    scope: VariableScope for the created subgraph; defaults to "Linear".
+  Returns:
+    A 2D Tensor with shape [batch x output_size] equal to
+    sum_i(input_[i] * W[i]), where W[i]s are newly created matrices.
+  Raises:
+    ValueError: if some of the arguments has unspecified or wrong shape.
+  '''
+
+    shape = input_.get_shape().as_list()
+    if len(shape) != 2:
+        raise ValueError("Linear is expecting 2D arguments: %s" % str(shape))
+    if not shape[1]:
+        raise ValueError("Linear expects shape[1] of arguments: %s" % str(shape))
+    input_size = shape[1]
+
+    # Now the computation.
+    with tf.variable_scope(scope or "SimpleLinear"):
+        matrix = tf.get_variable("Matrix", [output_size, input_size], dtype=input_.dtype)
+        bias_term = tf.get_variable("Bias", [output_size], dtype=input_.dtype)
+
+    return tf.matmul(input_, tf.transpose(matrix)) + bias_term
+
+
+def highway(input_, size, num_layers=1, bias=-2.0, f=tf.nn.relu, scope='Highway'):
+    """Highway Network (cf. http://arxiv.org/abs/1505.00387).
+    t = sigmoid(Wy + b)
+    z = t * g(Wy + b) + (1 - t) * y
+    where g is nonlinearity, t is transform gate, and (1 - t) is carry gate.
+    """
+
+    with tf.variable_scope(scope):
+        for idx in range(num_layers):
+            g = f(linear(input_, size, scope='highway_lin_%d' % idx))
+
+            t = tf.sigmoid(linear(input_, size, scope='highway_gate_%d' % idx) + bias)
+
+            output = t * g + (1. - t) * input_
+            input_ = output
+
+    return output
+
+
+class Discriminator(object):
+    """
+    A CNN for text classification.
+    Uses an embedding layer, followed by a convolutional, max-pooling and softmax layer.
+    """
+
+    def __init__(
+            self, sequence_length, num_classes, vocab_size,
+            embedding_size, filter_sizes, num_filters, l2_reg_lambda=0.0):
+        # Placeholders for input, output and dropout
+        self.input_x = tf.placeholder(tf.int32, [None, sequence_length], name="input_x")
+        self.input_y = tf.placeholder(tf.float32, [None, num_classes], name="input_y")
+        self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
+
+        # Keeping track of l2 regularization loss (optional)
+        l2_loss = tf.constant(0.0)
+
+        with tf.variable_scope('discriminator'):
+            # Embedding layer
+            with tf.device('/cpu:0'), tf.name_scope("embedding"):
+                self.W = tf.Variable(
+                    tf.random_uniform([vocab_size, embedding_size], -1.0, 1.0),
+                    name="W")
+                self.embedded_chars = tf.nn.embedding_lookup(self.W, self.input_x)
+                self.embedded_chars_expanded = tf.expand_dims(self.embedded_chars, -1)
+
+            # Create a convolution + maxpool layer for each filter size
+            pooled_outputs = []
+            for filter_size, num_filter in zip(filter_sizes, num_filters):
+                with tf.name_scope("conv-maxpool-%s" % filter_size):
+                    # Convolution Layer
+                    filter_shape = [filter_size, embedding_size, 1, num_filter]
+                    W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name="W")
+                    b = tf.Variable(tf.constant(0.1, shape=[num_filter]), name="b")
+                    conv = tf.nn.conv2d(
+                        self.embedded_chars_expanded,
+                        W,
+                        strides=[1, 1, 1, 1],
+                        padding="VALID",
+                        name="conv")
+                    # Apply nonlinearity
+                    h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu")
+                    # Maxpooling over the outputs
+                    pooled = tf.nn.max_pool(
+                        h,
+                        ksize=[1, sequence_length - filter_size + 1, 1, 1],
+                        strides=[1, 1, 1, 1],
+                        padding='VALID',
+                        name="pool")
+                    pooled_outputs.append(pooled)
+
+            # Combine all the pooled features
+            num_filters_total = sum(num_filters)
+            self.h_pool = tf.concat(pooled_outputs, 3)
+            self.h_pool_flat = tf.reshape(self.h_pool, [-1, num_filters_total])
+
+            # Add highway
+            with tf.name_scope("highway"):
+                self.h_highway = highway(self.h_pool_flat, self.h_pool_flat.get_shape()[1], 1, 0)
+
+            # Add dropout
+            with tf.name_scope("dropout"):
+                self.h_drop = tf.nn.dropout(self.h_highway, self.dropout_keep_prob)
+
+            # Final (unnormalized) scores and predictions
+            with tf.name_scope("output"):
+                W = tf.Variable(tf.truncated_normal([num_filters_total, num_classes], stddev=0.1), name="W")
+                b = tf.Variable(tf.constant(0.1, shape=[num_classes]), name="b")
+                l2_loss += tf.nn.l2_loss(W)
+                l2_loss += tf.nn.l2_loss(b)
+                self.scores = tf.nn.xw_plus_b(self.h_drop, W, b, name="scores")
+                self.ypred_for_auc = tf.nn.softmax(self.scores)
+                self.predictions = tf.argmax(self.scores, 1, name="predictions")
+
+            # CalculateMean cross-entropy loss
+            with tf.name_scope("loss"):
+                losses = tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.input_y)
+                self.loss = tf.reduce_mean(losses) + l2_reg_lambda * l2_loss
+
+        self.params = [param for param in tf.trainable_variables() if 'discriminator' in param.name]
+        d_optimizer = tf.train.AdamOptimizer(1e-4)
+        grads_and_vars = d_optimizer.compute_gradients(self.loss, self.params, aggregation_method=2)
+        self.train_op = d_optimizer.apply_gradients(grads_and_vars)
+
+
+
+
 class Dis_dataloader():
     def __init__(self, batch_size, seq_length):
         self.batch_size = batch_size
@@ -747,17 +751,18 @@ def candidate_measure(positive_samples, negative_samples, g_prediction, adjacenc
     if prob is True:
         for i in range(batch_size):
             generate_sequences = negative_samples[i, input_length:]
+            real_sequences = positive_samples[i, input_length:]
             new_prob_table = g_prediction[i, input_length:]
-            # new_prob_table = np.reshape(g_prediction[i, input_length:], ((sequence_length - input_length) * node_num))
             indices = np.reshape(np.argsort(-new_prob_table, axis=1)[:, :num], [-1]) % node_num
-            correct += len(set(indices) & set(generate_sequences))
+            correct += len((set(indices)|set(real_sequences)) & set(generate_sequences))
     else:
         for i in range(batch_size):
             generate_sequences = negative_samples[i, input_length:]
             real_sequences = positive_samples[i, input_length:]
-            neighbors = np.sum(adjacency_matrix[real_sequences], axis=0)
+            train_sequences = positive_samples[i, :input_length]
+            neighbors = np.sum(adjacency_matrix[train_sequences], axis=0)
             indices = np.argsort(-neighbors)[:(sequence_length - input_length) * num]
-            correct += len(set(indices) & set(generate_sequences))
+            correct += len((set(indices)|set(real_sequences)) & set(generate_sequences))
     return correct * 1.0 / batch_size / (sequence_length - input_length)
 
 
@@ -769,6 +774,7 @@ def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch, input_leng
     for i in xrange(num_batch):
         batch = utils.test_next_batch(batch_size, hard=True)
         neg_batch, g_prediction = trainable_model.generate_step(sess, batch)
+        check_instance(neg_batch, adjacency_matrix, batch_size)
         accuracy_list[i], loss_list[i] = trainable_model.get_accuracy(sess, batch)
 
         p_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=5,prob=False)
@@ -788,6 +794,22 @@ def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, tr
                 feed = {discriminator.input_x: x_batch, discriminator.input_y: y_batch, discriminator.dropout_keep_prob: dis_dropout_keep_prob}
                 _ = sess.run(discriminator.train_op, feed)
 
+
+def check_instance(negative_samples, adjacency_matrix, batch_size):
+    valid =[False] * batch_size
+    for i in range(negative_samples.shape[0]):
+        neighbor_indictor = adjacency_matrix[0]
+        valid_indictor = True
+        for j in range(1, negative_samples.shape[1]):
+            neighbor_set = set(np.where(neighbor_indictor > 0)[0])
+            if negative_samples[i][j] not in neighbor_set:
+                valid_indictor = False
+                break
+            neighbor_indictor += adjacency_matrix[negative_samples[i][j]]
+        valid[i] = valid_indictor
+    print valid
+    if sum(valid) != len(valid):
+        print 'These generated samples are not valid'
 
 
 def main():
