@@ -866,17 +866,22 @@ def main():
     graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
     adjacency_matrix = np.asarray(nx.adjacency_matrix(graph).todense()).transpose()
 
-
+    log_file = 'save/' + 'n@' + str(g_num_expend) + '_p@' + str(int(train_percent * 10))+ '.txt'
+    log = open(log_file, 'w')
     #  pre-train generator
     print 'Start pre-training...'
+    log.write('Start pre-training...')
     for epoch in xrange(g_pretrain_epochs):
         loss = pre_train_epoch(sess, generator, batch_size, train_batch)
         print 'pre-train epoch:%d loss:%.3f' % (epoch, loss)
+        log.write('pre-train epoch:%d loss:%.3f\n' % (epoch, loss))
         if epoch % 5 == 0:
             accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix, g_num_expend)
             print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
+            log.write('pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f\n' % (epoch, test_loss, accuracy, p_n, n_n))
 
     print 'Start pre-training discriminator...'
+    log.write('Start pre-training discriminator...\n')
     # Train 3 epoch on the generated data and do this for 50 times
     train_discrimintor(sess, generator, discriminator, d_pretrain_epochs, batch_size, train_batch, positive_samples,
                            dis_data_loader, d_dropout_prob)
@@ -885,6 +890,7 @@ def main():
 
     print '#########################################################################'
     print 'Start Adversarial Training...'
+    log.write('Start Adversarial Training...\n')
     for epoch in range(num_epochs):
         # Train the generator for one step
         for it in range(g_num_epochs):
@@ -895,7 +901,8 @@ def main():
         # Test
         if epoch % 5 == 0 or epoch == num_epochs - 1:
             accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix, g_num_expend)
-            print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
+            print 'train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
+            log.write('train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f\n' % (epoch, test_loss, accuracy, p_n, n_n))
 
         # Update roll-out parameters
         rollout.update_params()
