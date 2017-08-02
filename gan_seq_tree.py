@@ -120,7 +120,7 @@ class Generator(object):
         def _g_recurrence_2(i, x_t, h_tm1, gen_o, gen_x, g_predictions, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            g_predictions = g_predictions.write(i + self.input_length, tf.nnqq.softmax(o_t))  # batch x vocab_size
+            g_predictions = g_predictions.write(i + self.input_length, tf.nn.softmax(o_t))  # batch x vocab_size
             log_prob = tf.log(tf.nn.softmax(o_t))
             next_token = tf.cast(
                 tf.reshape(tf.multinomial(log_prob * tf.cast(neighbor, tf.float32), 1), [self.batch_size]), tf.int32)
