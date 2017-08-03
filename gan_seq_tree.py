@@ -777,7 +777,7 @@ def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch, input_leng
     p_num_list = [0.0] * num_batch
     n_num_list = [0.0] * num_batch
     for i in xrange(num_batch):
-        batch = utils.train_next_batch(batch_size, hard=True)
+        batch = utils.test_next_batch(batch_size, hard=True)
         neg_batch, g_prediction = trainable_model.generate_step(sess, batch)
         # utils.check_instance(neg_batch, adjacency_matrix, batch_size)
         accuracy_list[i], loss_list[i] = trainable_model.get_accuracy(sess, batch)
@@ -812,6 +812,8 @@ def main():
     vocab_size = args.num_node
     batch_size = args.batch_size
     num_epochs = args.num_epochs
+
+    log_file = args.output_file
 
 
     #  Generator  Hyper-parameters
@@ -866,7 +868,7 @@ def main():
     graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
     adjacency_matrix = np.asarray(nx.adjacency_matrix(graph).todense()).transpose()
 
-    log_file = 'save/' + 'n@' + str(g_num_expend) + '_p@' + str(int(train_percent * 10))+ '.txt'
+    # log_file = 'save/' + 'n@' + str(g_num_expend) + '_p@' + str(int(train_percent * 10))+ '.txt'
     log = open(log_file, 'w')
     #  pre-train generator
     print 'Start pre-training...'

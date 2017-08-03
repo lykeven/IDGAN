@@ -482,6 +482,8 @@ def parse_args_new():
 						help='Graph path')
 	parser.add_argument('-data_file', nargs='?', default='diffusion2.pkl',
 						help='Input diffusion data')
+	parser.add_argument('-output_file', nargs='?', default='result.txt',
+						help='Output file')
 	parser.add_argument('-seq_length', type=int, default=10,
 						help='Length of diffusion instance for generator. Default is 10.')
 	parser.add_argument('-num_epochs', type=int, default=200,
