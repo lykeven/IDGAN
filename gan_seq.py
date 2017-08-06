@@ -6,18 +6,20 @@ import tensorflow as tf
 from tensorflow.python.ops import tensor_array_ops, control_flow_ops
 import numpy as np
 import random
+import networkx as nx
 import utils
 
 
 class Generator(object):
     def __init__(self, num_emb, batch_size, emb_dim, hidden_dim,
-                 sequence_length, start_token,
-                 learning_rate=0.01, reward_gamma=0.95):
+                 sequence_length, start_token, input_length=5,
+                 learning_rate=0.01, reward_gamma=0.95, graph_file="graph2.txt"):
         self.num_emb = num_emb
         self.batch_size = batch_size
         self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
         self.sequence_length = sequence_length
+        self.input_length = input_length
         self.start_token = tf.constant([start_token] * self.batch_size, dtype=tf.int32)
         self.learning_rate = tf.Variable(float(learning_rate), trainable=False)
         self.reward_gamma = reward_gamma
@@ -25,6 +27,9 @@ class Generator(object):
         self.d_params = []
         self.temperature = 1.0
         self.grad_clip = 5.0
+
+        graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
+        self.adj = tf.constant(np.asarray(nx.adjacency_matrix(graph).todense()).transpose(), dtype=tf.int32, shape=[num_emb, num_emb])
 
         self.expected_reward = tf.Variable(tf.zeros([self.sequence_length]))
 
@@ -39,39 +44,19 @@ class Generator(object):
         self.rewards = tf.placeholder(tf.float32, shape=[self.batch_size, self.sequence_length]) # get from rollout policy and discriminator
 
         # processed for batch
-        with tf.device("/cpu:0"):
-            self.processed_x = tf.transpose(tf.nn.embedding_lookup(self.g_embeddings, self.x), perm=[1, 0, 2])  # seq_length x batch_size x emb_dim
+        self.processed_x = tf.transpose(tf.nn.embedding_lookup(self.g_embeddings, self.x), perm=[1, 0, 2])  # seq_length x batch_size x emb_dim
+        self.x_seq = tf.transpose(self.x, perm=[1, 0])
 
         # Initial states
         self.h0 = tf.zeros([self.batch_size, self.hidden_dim])
         self.h0 = tf.stack([self.h0, self.h0])
 
-        gen_o = tensor_array_ops.TensorArray(dtype=tf.float32, size=self.sequence_length,
-                                             dynamic_size=False, infer_shape=True)
-        gen_x = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length,
-                                             dynamic_size=False, infer_shape=True)
+        self.pretrain()
+        self.generate()
+        self.update()
 
-        def _g_recurrence(i, x_t, h_tm1, gen_o, gen_x):
-            h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
-            o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            log_prob = tf.log(tf.nn.softmax(o_t))
-            next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
-            x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
-            gen_o = gen_o.write(i, tf.reduce_sum(tf.multiply(tf.one_hot(next_token, self.num_emb, 1.0, 0.0),
-                                                             tf.nn.softmax(o_t)), 1))  # [batch_size] , prob
-            gen_x = gen_x.write(i, next_token)  # indices, batch_size
-            return i + 1, x_tp1, h_t, gen_o, gen_x
 
-        _, _, _, self.gen_o, self.gen_x = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4: i < self.sequence_length,
-            body=_g_recurrence,
-            loop_vars=(tf.constant(0, dtype=tf.int32),
-                       tf.nn.embedding_lookup(self.g_embeddings, self.start_token), self.h0, gen_o, gen_x))
-
-        self.gen_x = self.gen_x.stack()  # seq_length x batch_size
-        self.gen_x = tf.transpose(self.gen_x, perm=[1, 0])  # batch_size x seq_length
-
-        # supervised pretraining for generator
+    def pretrain(self,):
         g_predictions = tensor_array_ops.TensorArray(
             dtype=tf.float32, size=self.sequence_length,
             dynamic_size=False, infer_shape=True)
@@ -109,48 +94,76 @@ class Generator(object):
         self.pretrain_grad, _ = tf.clip_by_global_norm(tf.gradients(self.pretrain_loss, self.g_params), self.grad_clip)
         self.pretrain_updates = pretrain_opt.apply_gradients(zip(self.pretrain_grad, self.g_params))
 
-        #######################################################################################################
-        #  Unsupervised Training
-        #######################################################################################################
-        self.g_loss = -tf.reduce_sum(
-            tf.reduce_sum(
-                tf.one_hot(tf.to_int32(tf.reshape(self.x, [-1])), self.num_emb, 1.0, 0.0) * tf.log(
-                    tf.clip_by_value(tf.reshape(self.g_predictions, [-1, self.num_emb]), 1e-20, 1.0)
-                ), 1) * tf.reshape(self.rewards, [-1])
-        )
 
-        g_opt = self.g_optimizer(self.learning_rate)
+    def generate(self,):
+        # supervised pretraining for generator
+        ta_emb_x = tensor_array_ops.TensorArray(
+            dtype=tf.float32, size=self.sequence_length)
+        ta_emb_x = ta_emb_x.unstack(self.processed_x)
 
-        self.g_grad, _ = tf.clip_by_global_norm(tf.gradients(self.g_loss, self.g_params), self.grad_clip)
-        self.g_updates = g_opt.apply_gradients(zip(self.g_grad, self.g_params))
+        ta_ind_x = tensor_array_ops.TensorArray(
+            dtype=tf.int32, size=self.sequence_length)
+        ta_ind_x = ta_ind_x.unstack(self.x_seq)
 
-        #######################################################################################################
-        #  Performance test with Generating last half sequence
-        #######################################################################################################
 
-        g_pred_prob = tensor_array_ops.TensorArray(
+        def _pretrain_recurrence_2(i, x_t, h_tm1, g_predictions, neighbor):
+            h_t = self.g_recurrent_unit(x_t, h_tm1)
+            o_t = self.g_output_unit(h_t)
+            prob = tf.nn.softmax(o_t)  *  tf.cast(neighbor, tf.float32)
+            prob = tf.nn.l2_normalize(prob, dim=1)
+            g_predictions = g_predictions.write(i, prob)  # batch x vocab_size
+            x_tp1 = ta_emb_x.read(i)
+            x_ind = ta_ind_x.read(i)
+            # temp = tf.gather_nd(self.adj, x_ind)
+            temp = tf.nn.embedding_lookup(self.adj, x_ind)
+            neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
+            return i + 1, x_tp1, h_t, g_predictions, neighbor
+
+        def _g_recurrence_2(i, x_t, h_tm1, gen_o, gen_x, g_predictions, neighbor):
+            h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
+            o_t = self.g_output_unit(h_t)
+            prob = tf.nn.softmax(o_t)
+            g_predictions = g_predictions.write(i + self.input_length, prob)  # batch x vocab_size
+            log_prob = tf.log(prob)
+            next_token = tf.cast(
+                tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
+            x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
+            gen_o = gen_o.write(i, tf.reduce_sum(tf.multiply(tf.one_hot(next_token, self.num_emb, 1.0, 0.0),
+                                                             tf.nn.softmax(o_t)), 1))  # [batch_size] , prob
+            gen_x = gen_x.write(i, next_token)  # indices, batch_size
+
+            # temp = tf.gather_nd(self.adj, [next_token])
+            temp = tf.nn.embedding_lookup(self.adj, next_token)
+            neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
+            return i + 1, x_tp1, h_t, gen_o, gen_x, g_predictions, neighbor
+
+        g_predictions_2 = tensor_array_ops.TensorArray(
             dtype=tf.float32, size=self.sequence_length,
             dynamic_size=False, infer_shape=True)
 
-        gen_o_f2 = tensor_array_ops.TensorArray(dtype=tf.float32, size=self.sequence_length / 2,
+        gen_o_f2 = tensor_array_ops.TensorArray(dtype=tf.float32, size=self.sequence_length - self.input_length,
                                                 dynamic_size=False, infer_shape=True)
-        gen_x_f2 = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length / 2,
+        gen_x_f2 = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length - self.input_length,
                                                 dynamic_size=False, infer_shape=True)
 
-        _, x_f2, h_f2, pre = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3: i < self.sequence_length / 2,
-            body=_pretrain_recurrence,
+        self.neghbor = tf.placeholder(tf.int32, shape=[self.batch_size, self.num_emb])
+        # init_neghbor = tf.Variable(tf.zeros([self.batch_size, self.num_emb],dtype=tf.int32))
+
+        _, x_f2, h_f2, g_predictions_2, new_neghbor = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, _3, _4: i < self.input_length,
+            body=_pretrain_recurrence_2,
             loop_vars=(tf.constant(0, dtype=tf.int32),
                        tf.nn.embedding_lookup(self.g_embeddings, self.start_token),
-                       self.h0, g_pred_prob))
-        _, _, _, _, gen_seq = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4: i < self.sequence_length / 2,
-            body=_g_recurrence,
+                       self.h0, g_predictions_2, self.neghbor))
+        _, _, _, _, gen_seq, self.g_predictions_2, new_neghbor = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, _3, _4, _5, _6: i < self.sequence_length - self.input_length,
+            body=_g_recurrence_2,
             loop_vars=(tf.constant(0, dtype=tf.int32),
-                       x_f2, h_f2, gen_o_f2, gen_x_f2))
+                       x_f2, h_f2, gen_o_f2, gen_x_f2, g_predictions_2, new_neghbor))
 
-        gen_seq = tf.transpose(gen_seq.stack(), perm=[1, 0])  # batch_size x seq_length / 2
-        ground_truth = self.x[:, self.sequence_length / 2:]
+        self.g_predictions_2 = tf.transpose(self.g_predictions_2.stack(), perm=[1, 0, 2])  # batch_size x seq_length x vocab_size
+        self.gen_seq = tf.transpose(gen_seq.stack(), perm=[1, 0])  # batch_size x seq_length / 2
+        self.gen_x = tf.concat([self.x[:, :self.input_length], self.gen_seq], axis=1)
 
         def compute_accuracy(x, y):
             intersection = tf.sets.set_intersection(x, y)
@@ -159,19 +172,51 @@ class Generator(object):
             total_number = tf.cast(tf.sets.set_size(union), tf.float32)
             return tf.reduce_mean(correct_number * 1.0 / total_number)
 
-        self.accuracy = compute_accuracy(gen_seq, ground_truth)
+        ground_truth = self.x[:, self.sequence_length - self.input_length:]
+        self.accuracy = compute_accuracy(self.gen_seq, ground_truth)
 
-    def get_accuracy(self, sess, x):
-        output = sess.run(self.accuracy, feed_dict={self.x: x})
-        return output
+        self.train_loss = -tf.reduce_sum(
+            tf.one_hot(tf.to_int32(tf.reshape(self.x, [-1])), self.num_emb, 1.0, 0.0) * tf.log(
+                tf.clip_by_value(tf.reshape(self.g_predictions_2, [-1, self.num_emb]), 1e-20, 1.0)
+            )
+        ) / (self.sequence_length * self.batch_size)
 
-    def generate(self, sess):
-        outputs = sess.run(self.gen_x)
-        return outputs
+
+    def update(self,):
+        self.g_loss = -tf.reduce_sum(
+            tf.reduce_sum(
+                tf.one_hot(tf.to_int32(tf.reshape(self.x, [-1])), self.num_emb, 1.0, 0.0) * tf.log(
+                    tf.clip_by_value(tf.reshape(self.g_predictions_2, [-1, self.num_emb]), 1e-20, 1.0)
+                ), 1) * tf.reshape(self.rewards, [-1])
+        )
+
+        g_opt = self.g_optimizer(self.learning_rate)
+        self.g_grad, _ = tf.clip_by_global_norm(tf.gradients(self.g_loss, self.g_params), self.grad_clip)
+        self.g_updates = g_opt.apply_gradients(zip(self.g_grad, self.g_params))
+
 
     def pretrain_step(self, sess, x):
         outputs = sess.run([self.pretrain_updates, self.pretrain_loss], feed_dict={self.x: x})
         return outputs
+
+
+    def generate_step(self, sess, x):
+        feed_dict = {self.x: x, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+        generate_sequence, generate_prob_table = sess.run([self.gen_x, self.g_predictions_2], feed_dict=feed_dict)
+        return generate_sequence, generate_prob_table
+
+
+    def get_accuracy(self, sess, x):
+        feed_dict = {self.x: x, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+        accuracy, loss = sess.run([self.accuracy, self.train_loss], feed_dict=feed_dict)
+        return accuracy, loss
+
+
+    def update_step(self, sess, x, reward):
+        feed_dict = {self.x: x, self.rewards:reward, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+        _ = sess.run(self.g_updates, feed_dict)
+
+
 
     def init_matrix(self, shape):
         return tf.random_normal(shape, stddev=0.1)
@@ -257,139 +302,6 @@ class Generator(object):
         return tf.train.AdamOptimizer(*args, **kwargs)
 
 
-def linear(input_, output_size, scope=None):
-    '''
-    Linear map: output[k] = sum_i(Matrix[k, i] * input_[i] ) + Bias[k]
-    Args:
-    input_: a tensor or a list of 2D, batch x n, Tensors.
-    output_size: int, second dimension of W[i].
-    scope: VariableScope for the created subgraph; defaults to "Linear".
-  Returns:
-    A 2D Tensor with shape [batch x output_size] equal to
-    sum_i(input_[i] * W[i]), where W[i]s are newly created matrices.
-  Raises:
-    ValueError: if some of the arguments has unspecified or wrong shape.
-  '''
-
-    shape = input_.get_shape().as_list()
-    if len(shape) != 2:
-        raise ValueError("Linear is expecting 2D arguments: %s" % str(shape))
-    if not shape[1]:
-        raise ValueError("Linear expects shape[1] of arguments: %s" % str(shape))
-    input_size = shape[1]
-
-    # Now the computation.
-    with tf.variable_scope(scope or "SimpleLinear"):
-        matrix = tf.get_variable("Matrix", [output_size, input_size], dtype=input_.dtype)
-        bias_term = tf.get_variable("Bias", [output_size], dtype=input_.dtype)
-
-    return tf.matmul(input_, tf.transpose(matrix)) + bias_term
-
-
-def highway(input_, size, num_layers=1, bias=-2.0, f=tf.nn.relu, scope='Highway'):
-    """Highway Network (cf. http://arxiv.org/abs/1505.00387).
-    t = sigmoid(Wy + b)
-    z = t * g(Wy + b) + (1 - t) * y
-    where g is nonlinearity, t is transform gate, and (1 - t) is carry gate.
-    """
-
-    with tf.variable_scope(scope):
-        for idx in range(num_layers):
-            g = f(linear(input_, size, scope='highway_lin_%d' % idx))
-
-            t = tf.sigmoid(linear(input_, size, scope='highway_gate_%d' % idx) + bias)
-
-            output = t * g + (1. - t) * input_
-            input_ = output
-
-    return output
-
-
-class Discriminator(object):
-    """
-    A CNN for text classification.
-    Uses an embedding layer, followed by a convolutional, max-pooling and softmax layer.
-    """
-
-    def __init__(
-            self, sequence_length, num_classes, vocab_size,
-            embedding_size, filter_sizes, num_filters, l2_reg_lambda=0.0):
-        # Placeholders for input, output and dropout
-        self.input_x = tf.placeholder(tf.int32, [None, sequence_length], name="input_x")
-        self.input_y = tf.placeholder(tf.float32, [None, num_classes], name="input_y")
-        self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
-
-        # Keeping track of l2 regularization loss (optional)
-        l2_loss = tf.constant(0.0)
-
-        with tf.variable_scope('discriminator'):
-            # Embedding layer
-            with tf.device('/cpu:0'), tf.name_scope("embedding"):
-                self.W = tf.Variable(
-                    tf.random_uniform([vocab_size, embedding_size], -1.0, 1.0),
-                    name="W")
-                self.embedded_chars = tf.nn.embedding_lookup(self.W, self.input_x)
-                self.embedded_chars_expanded = tf.expand_dims(self.embedded_chars, -1)
-
-            # Create a convolution + maxpool layer for each filter size
-            pooled_outputs = []
-            for filter_size, num_filter in zip(filter_sizes, num_filters):
-                with tf.name_scope("conv-maxpool-%s" % filter_size):
-                    # Convolution Layer
-                    filter_shape = [filter_size, embedding_size, 1, num_filter]
-                    W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name="W")
-                    b = tf.Variable(tf.constant(0.1, shape=[num_filter]), name="b")
-                    conv = tf.nn.conv2d(
-                        self.embedded_chars_expanded,
-                        W,
-                        strides=[1, 1, 1, 1],
-                        padding="VALID",
-                        name="conv")
-                    # Apply nonlinearity
-                    h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu")
-                    # Maxpooling over the outputs
-                    pooled = tf.nn.max_pool(
-                        h,
-                        ksize=[1, sequence_length - filter_size + 1, 1, 1],
-                        strides=[1, 1, 1, 1],
-                        padding='VALID',
-                        name="pool")
-                    pooled_outputs.append(pooled)
-
-            # Combine all the pooled features
-            num_filters_total = sum(num_filters)
-            self.h_pool = tf.concat(pooled_outputs, 3)
-            self.h_pool_flat = tf.reshape(self.h_pool, [-1, num_filters_total])
-
-            # Add highway
-            with tf.name_scope("highway"):
-                self.h_highway = highway(self.h_pool_flat, self.h_pool_flat.get_shape()[1], 1, 0)
-
-            # Add dropout
-            with tf.name_scope("dropout"):
-                self.h_drop = tf.nn.dropout(self.h_highway, self.dropout_keep_prob)
-
-            # Final (unnormalized) scores and predictions
-            with tf.name_scope("output"):
-                W = tf.Variable(tf.truncated_normal([num_filters_total, num_classes], stddev=0.1), name="W")
-                b = tf.Variable(tf.constant(0.1, shape=[num_classes]), name="b")
-                l2_loss += tf.nn.l2_loss(W)
-                l2_loss += tf.nn.l2_loss(b)
-                self.scores = tf.nn.xw_plus_b(self.h_drop, W, b, name="scores")
-                self.ypred_for_auc = tf.nn.softmax(self.scores)
-                self.predictions = tf.argmax(self.scores, 1, name="predictions")
-
-            # CalculateMean cross-entropy loss
-            with tf.name_scope("loss"):
-                losses = tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.input_y)
-                self.loss = tf.reduce_mean(losses) + l2_reg_lambda * l2_loss
-
-        self.params = [param for param in tf.trainable_variables() if 'discriminator' in param.name]
-        d_optimizer = tf.train.AdamOptimizer(1e-4)
-        grads_and_vars = d_optimizer.compute_gradients(self.loss, self.params, aggregation_method=2)
-        self.train_op = d_optimizer.apply_gradients(grads_and_vars)
-
-
 
 class ROLLOUT(object):
     def __init__(self, lstm, update_rate):
@@ -431,33 +343,43 @@ class ROLLOUT(object):
         gen_x = tensor_array_ops.TensorArray(dtype=tf.int32, size=self.sequence_length,
                                              dynamic_size=False, infer_shape=True)
 
+        self.neghbor = tf.placeholder(tf.int32, shape=[self.batch_size, self.num_emb])
+        self.adj = self.lstm.adj
+
         # When current index i < given_num, use the provided tokens as the input at each time step
-        def _g_recurrence_1(i, x_t, h_tm1, given_num, gen_x):
+        def _g_recurrence_1(i, x_t, h_tm1, given_num, gen_x, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
             x_tp1 = ta_emb_x.read(i)
-            gen_x = gen_x.write(i, ta_x.read(i))
-            return i + 1, x_tp1, h_t, given_num, gen_x
+            next_token = ta_x.read(i)
+            gen_x = gen_x.write(i, next_token)
+            temp = tf.nn.embedding_lookup(self.adj, next_token)
+            neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
+            return i + 1, x_tp1, h_t, given_num, gen_x, neighbor
 
         # When current index i >= given_num, start roll-out, use the output as time step t as the input at time step t+1
-        def _g_recurrence_2(i, x_t, h_tm1, given_num, gen_x):
+        def _g_recurrence_2(i, x_t, h_tm1, given_num, gen_x, neighbor):
             h_t = self.g_recurrent_unit(x_t, h_tm1)  # hidden_memory_tuple
-            o_t = self.g_output_unit(h_t)  # batch x vocab , logits not prob
-            log_prob = tf.log(tf.nn.softmax(o_t))
+            o_t = self.g_output_unit(h_t)
+            prob = tf.nn.softmax(o_t)
+            log_prob = tf.log(prob)
             next_token = tf.cast(tf.reshape(tf.multinomial(log_prob, 1), [self.batch_size]), tf.int32)
             x_tp1 = tf.nn.embedding_lookup(self.g_embeddings, next_token)  # batch x emb_dim
             gen_x = gen_x.write(i, next_token)  # indices, batch_size
-            return i + 1, x_tp1, h_t, given_num, gen_x
+            temp = tf.nn.embedding_lookup(self.adj, next_token)
+            neighbor = 1 - tf.cast(tf.equal(tf.zeros_like(temp), temp + neighbor), tf.int32)
 
-        i, x_t, h_tm1, given_num, self.gen_x = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, given_num, _4: i < given_num,
+            return i + 1, x_tp1, h_t, given_num, gen_x, neighbor
+
+        i, x_t, h_tm1, given_num, gen_x, new_neighbor = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, given_num, _4, _5: i < given_num,
             body=_g_recurrence_1,
             loop_vars=(tf.constant(0, dtype=tf.int32),
-                       tf.nn.embedding_lookup(self.g_embeddings, self.start_token), self.h0, self.given_num, gen_x))
+                       tf.nn.embedding_lookup(self.g_embeddings, self.start_token), self.h0, self.given_num, gen_x, self.neghbor))
 
-        _, _, _, _, self.gen_x = control_flow_ops.while_loop(
-            cond=lambda i, _1, _2, _3, _4: i < self.sequence_length,
+        _, _, _, _, self.gen_x, new_neighbor = control_flow_ops.while_loop(
+            cond=lambda i, _1, _2, _3, _4, _5: i < self.sequence_length,
             body=_g_recurrence_2,
-            loop_vars=(i, x_t, h_tm1, given_num, self.gen_x))
+            loop_vars=(i, x_t, h_tm1, given_num, gen_x, new_neighbor))
 
         self.gen_x = self.gen_x.stack()  # seq_length x batch_size
         self.gen_x = tf.transpose(self.gen_x, perm=[1, 0])  # batch_size x seq_length
@@ -466,7 +388,8 @@ class ROLLOUT(object):
         rewards = []
         for i in range(rollout_num):
             for given_num in range(1, self.sequence_length):
-                feed = {self.x: input_x, self.given_num: given_num}
+                feed = {self.x: input_x, self.given_num: given_num, self.neghbor: np.zeros(shape=(self.batch_size, self.num_emb), dtype=np.int32)}
+                # feed = {self.x: input_x, self.given_num: given_num}
                 samples = sess.run(self.gen_x, feed)
                 feed = {discriminator.input_x: samples, discriminator.dropout_keep_prob: 1.0}
                 ypred_for_auc = sess.run(discriminator.ypred_for_auc, feed)
@@ -631,34 +554,139 @@ class ROLLOUT(object):
 
 
 
-class Gen_Data_loader():
-    def __init__(self, batch_size, seq_length):
-        self.batch_size = batch_size
-        self.seq_length = seq_length
-        self.token_stream = []
+def linear(input_, output_size, scope=None):
+    '''
+    Linear map: output[k] = sum_i(Matrix[k, i] * input_[i] ) + Bias[k]
+    Args:
+    input_: a tensor or a list of 2D, batch x n, Tensors.
+    output_size: int, second dimension of W[i].
+    scope: VariableScope for the created subgraph; defaults to "Linear".
+  Returns:
+    A 2D Tensor with shape [batch x output_size] equal to
+    sum_i(input_[i] * W[i]), where W[i]s are newly created matrices.
+  Raises:
+    ValueError: if some of the arguments has unspecified or wrong shape.
+  '''
 
-    def create_batches(self, data_file):
-        self.token_stream = []
-        with open(data_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                line = line.split()
-                parse_line = [int(x) for x in line]
-                if len(parse_line) == self.seq_length:
-                    self.token_stream.append(parse_line)
+    shape = input_.get_shape().as_list()
+    if len(shape) != 2:
+        raise ValueError("Linear is expecting 2D arguments: %s" % str(shape))
+    if not shape[1]:
+        raise ValueError("Linear expects shape[1] of arguments: %s" % str(shape))
+    input_size = shape[1]
 
-        self.num_batch = int(len(self.token_stream) / self.batch_size)
-        self.token_stream = self.token_stream[:self.num_batch * self.batch_size]
-        self.sequence_batch = np.split(np.array(self.token_stream), self.num_batch, 0)
-        self.pointer = 0
+    # Now the computation.
+    with tf.variable_scope(scope or "SimpleLinear"):
+        matrix = tf.get_variable("Matrix", [output_size, input_size], dtype=input_.dtype)
+        bias_term = tf.get_variable("Bias", [output_size], dtype=input_.dtype)
 
-    def next_batch(self):
-        ret = self.sequence_batch[self.pointer]
-        self.pointer = (self.pointer + 1) % self.num_batch
-        return ret
+    return tf.matmul(input_, tf.transpose(matrix)) + bias_term
 
-    def reset_pointer(self):
-        self.pointer = 0
+
+def highway(input_, size, num_layers=1, bias=-2.0, f=tf.nn.relu, scope='Highway'):
+    """Highway Network (cf. http://arxiv.org/abs/1505.00387).
+    t = sigmoid(Wy + b)
+    z = t * g(Wy + b) + (1 - t) * y
+    where g is nonlinearity, t is transform gate, and (1 - t) is carry gate.
+    """
+
+    with tf.variable_scope(scope):
+        for idx in range(num_layers):
+            g = f(linear(input_, size, scope='highway_lin_%d' % idx))
+
+            t = tf.sigmoid(linear(input_, size, scope='highway_gate_%d' % idx) + bias)
+
+            output = t * g + (1. - t) * input_
+            input_ = output
+
+    return output
+
+
+class Discriminator(object):
+    """
+    A CNN for text classification.
+    Uses an embedding layer, followed by a convolutional, max-pooling and softmax layer.
+    """
+
+    def __init__(
+            self, sequence_length, num_classes, vocab_size,
+            embedding_size, filter_sizes, num_filters, l2_reg_lambda=0.0):
+        # Placeholders for input, output and dropout
+        self.input_x = tf.placeholder(tf.int32, [None, sequence_length], name="input_x")
+        self.input_y = tf.placeholder(tf.float32, [None, num_classes], name="input_y")
+        self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
+
+        # Keeping track of l2 regularization loss (optional)
+        l2_loss = tf.constant(0.0)
+
+        with tf.variable_scope('discriminator'):
+            # Embedding layer
+            with tf.device('/cpu:0'), tf.name_scope("embedding"):
+                self.W = tf.Variable(
+                    tf.random_uniform([vocab_size, embedding_size], -1.0, 1.0),
+                    name="W")
+                self.embedded_chars = tf.nn.embedding_lookup(self.W, self.input_x)
+                self.embedded_chars_expanded = tf.expand_dims(self.embedded_chars, -1)
+
+            # Create a convolution + maxpool layer for each filter size
+            pooled_outputs = []
+            for filter_size, num_filter in zip(filter_sizes, num_filters):
+                with tf.name_scope("conv-maxpool-%s" % filter_size):
+                    # Convolution Layer
+                    filter_shape = [filter_size, embedding_size, 1, num_filter]
+                    W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name="W")
+                    b = tf.Variable(tf.constant(0.1, shape=[num_filter]), name="b")
+                    conv = tf.nn.conv2d(
+                        self.embedded_chars_expanded,
+                        W,
+                        strides=[1, 1, 1, 1],
+                        padding="VALID",
+                        name="conv")
+                    # Apply nonlinearity
+                    h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu")
+                    # Maxpooling over the outputs
+                    pooled = tf.nn.max_pool(
+                        h,
+                        ksize=[1, sequence_length - filter_size + 1, 1, 1],
+                        strides=[1, 1, 1, 1],
+                        padding='VALID',
+                        name="pool")
+                    pooled_outputs.append(pooled)
+
+            # Combine all the pooled features
+            num_filters_total = sum(num_filters)
+            self.h_pool = tf.concat(pooled_outputs, 3)
+            self.h_pool_flat = tf.reshape(self.h_pool, [-1, num_filters_total])
+
+            # Add highway
+            with tf.name_scope("highway"):
+                self.h_highway = highway(self.h_pool_flat, self.h_pool_flat.get_shape()[1], 1, 0)
+
+            # Add dropout
+            with tf.name_scope("dropout"):
+                self.h_drop = tf.nn.dropout(self.h_highway, self.dropout_keep_prob)
+
+            # Final (unnormalized) scores and predictions
+            with tf.name_scope("output"):
+                W = tf.Variable(tf.truncated_normal([num_filters_total, num_classes], stddev=0.1), name="W")
+                b = tf.Variable(tf.constant(0.1, shape=[num_classes]), name="b")
+                l2_loss += tf.nn.l2_loss(W)
+                l2_loss += tf.nn.l2_loss(b)
+                self.scores = tf.nn.xw_plus_b(self.h_drop, W, b, name="scores")
+                self.ypred_for_auc = tf.nn.softmax(self.scores)
+                self.predictions = tf.argmax(self.scores, 1, name="predictions")
+
+            # CalculateMean cross-entropy loss
+            with tf.name_scope("loss"):
+                losses = tf.nn.softmax_cross_entropy_with_logits(logits=self.scores, labels=self.input_y)
+                self.loss = tf.reduce_mean(losses) + l2_reg_lambda * l2_loss
+
+        self.params = [param for param in tf.trainable_variables() if 'discriminator' in param.name]
+        d_optimizer = tf.train.AdamOptimizer(1e-4)
+        grads_and_vars = d_optimizer.compute_gradients(self.loss, self.params, aggregation_method=2)
+        self.train_op = d_optimizer.apply_gradients(grads_and_vars)
+
+
 
 
 class Dis_dataloader():
@@ -668,23 +696,7 @@ class Dis_dataloader():
         self.sentences = np.array([])
         self.labels = np.array([])
 
-    def load_train_data(self, positive_file, negative_file):
-        # Load data
-        positive_examples = []
-        negative_examples = []
-        with open(positive_file)as fin:
-            for line in fin:
-                line = line.strip()
-                line = line.split()
-                parse_line = [int(x) for x in line]
-                positive_examples.append(parse_line)
-        with open(negative_file)as fin:
-            for line in fin:
-                line = line.strip()
-                line = line.split()
-                parse_line = [int(x) for x in line]
-                if len(parse_line) == self.seq_length:
-                    negative_examples.append(parse_line)
+    def load_train_data(self, positive_examples, negative_examples):
         self.sentences = np.array(positive_examples + negative_examples)
 
         # Generate labels
@@ -717,197 +729,187 @@ class Dis_dataloader():
 
 
 
-def generate_samples(sess, trainable_model, batch_size, generated_num, output_file, is_real=False, data_file="diffusion2.pkl", is_test=False):
+def generate_samples(sess, trainable_model, batch_size, train_batch, real_samples):
     # Generate Samples
     generated_samples = []
-    if is_real is True:
-        generated_samples = utils.feed_data_all(data_file, generated_num, is_test)
-    else:
-        for _ in range(int(generated_num / batch_size)):
-            generated_samples.extend(trainable_model.generate(sess))
-
-    with open(output_file, 'w') as fout:
-        for poem in generated_samples:
-            buffer = ' '.join([str(x) for x in poem]) + '\n'
-            fout.write(buffer)
+    for i in range(train_batch):
+        samples, _ = trainable_model.generate_step(sess, real_samples[i * batch_size: (i + 1) * batch_size])
+        generated_samples.extend(samples)
+    return generated_samples
 
 
-def target_loss(sess, target_lstm, data_loader):
-    # target_loss means the oracle negative log-likelihood tested with the oracle model "target_lstm"
-    # For more details, please see the Section 4 in https://arxiv.org/abs/1609.05473
-    nll = []
-    data_loader.reset_pointer()
-
-    for it in xrange(data_loader.num_batch):
-        batch = data_loader.next_batch()
-        g_loss = sess.run(target_lstm.pretrain_loss, {target_lstm.x: batch})
-        nll.append(g_loss)
-
-    return np.mean(nll)
-
-
-def pre_train_epoch(sess, trainable_model, data_loader):
+def pre_train_epoch(sess, trainable_model, batch_size, num_batch):
     # Pre-train the generator using MLE for one epoch
     supervised_g_losses = []
-    data_loader.reset_pointer()
-
-    for it in xrange(data_loader.num_batch):
-        batch = data_loader.next_batch()
+    for it in xrange(num_batch):
+        batch = utils.train_next_batch(batch_size, hard=True)
         _, g_loss = trainable_model.pretrain_step(sess, batch)
         supervised_g_losses.append(g_loss)
-
     return np.mean(supervised_g_losses)
 
 
-def test_accuracy_epoch(sess, trainable_model, data_loader, test_epochs=2):
-    accuracy_list = []
-    data_loader.reset_pointer()
-    for it in xrange(test_epochs):
-        batch = data_loader.next_batch()
-        accuracy = trainable_model.get_accuracy(sess, batch)
-        accuracy_list.append(accuracy)
-    print("Test accuracy : %.5f" % (np.mean(accuracy_list)))
+def candidate_measure(positive_samples, negative_samples, g_prediction, adjacency_matrix, input_length, num=5, prob=False):
+    batch_size, sequence_length, node_num = g_prediction.shape
+    correct = 0
+    if prob is True:
+        for i in range(batch_size):
+            generate_sequences = negative_samples[i, input_length:]
+            real_sequences = positive_samples[i, input_length:]
+            new_prob_table = g_prediction[i, input_length:]
+            indices = np.reshape(np.argsort(-new_prob_table, axis=1)[:, :num], [-1]) % node_num
+            correct += len((set(indices)|set(real_sequences)) & set(generate_sequences))
+    else:
+        for i in range(batch_size):
+            generate_sequences = negative_samples[i, input_length:]
+            real_sequences = positive_samples[i, input_length:]
+            train_sequences = positive_samples[i, :input_length]
+            neighbors = np.sum(adjacency_matrix[train_sequences], axis=0)
+            indices = np.argsort(-neighbors)[:(sequence_length - input_length) * num]
+            correct += len((set(indices)|set(real_sequences)) & set(generate_sequences))
+    return correct * 1.0 / batch_size / (sequence_length - input_length)
+
+
+def test_accuracy_epoch(sess, trainable_model, batch_size, num_batch, input_length, adjacency_matrix, num_expend=5):
+    accuracy_list = [0.0] * num_batch
+    loss_list = [0.0] * num_batch
+    p_num_list = [0.0] * num_batch
+    n_num_list = [0.0] * num_batch
+    for i in xrange(num_batch):
+        batch = utils.test_next_batch(batch_size, hard=True)
+        neg_batch, g_prediction = trainable_model.generate_step(sess, batch)
+        # utils.check_instance(neg_batch, adjacency_matrix, batch_size)
+        accuracy_list[i], loss_list[i] = trainable_model.get_accuracy(sess, batch)
+
+        p_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=num_expend,prob=False)
+        n_num_list[i] = candidate_measure(batch, neg_batch, g_prediction, adjacency_matrix, input_length, num=num_expend,prob=True)
+
+    return np.mean(accuracy_list), np.mean(loss_list), np.mean(p_num_list), np.mean(n_num_list)
+
+
+def train_discrimintor(sess, generator, discriminator, epoch_num, batch_size, train_batch, positive_samples, dis_data_loader, dis_dropout_keep_prob = 0.75):
+    for _ in range(epoch_num):
+        negative_samples = generate_samples(sess, generator, batch_size, train_batch, positive_samples)
+        dis_data_loader.load_train_data(positive_samples, negative_samples)
+        for _ in range(3):
+            dis_data_loader.reset_pointer()
+            for it in xrange(dis_data_loader.num_batch):
+                x_batch, y_batch = dis_data_loader.next_batch()
+                feed = {discriminator.input_x: x_batch, discriminator.input_y: y_batch, discriminator.dropout_keep_prob: dis_dropout_keep_prob}
+                _ = sess.run(discriminator.train_op, feed)
+
 
 
 def main():
-    #########################################################################################
+    args = utils.parse_args_new()
+    #  Data Parameters
+    origin_data_file = args.data_file
+    graph_file = args.graph_file
+    generated_num = args.num_train_sample
+    generated_num_test = args.num_test_sample
+    seq_length = args.seq_length
+    vocab_size = args.num_node
+    batch_size = args.batch_size
+    num_epochs = args.num_epochs
+
+    log_file = args.output_file
+
+
     #  Generator  Hyper-parameters
-    ######################################################################################
-    EMB_DIM = 32  # embedding dimension
-    HIDDEN_DIM = 32  # hidden state dimension of lstm cell
-    SEQ_LENGTH = 10  # sequence length
-    START_TOKEN = 0
-    PRE_EPOCH_NUM = 120  # supervise (maximum likelihood estimation) epochs
-    SEED = 88
-    BATCH_SIZE = 25
-    vocab_size = 755
-    generated_num = 225
-    generated_num_test = 50
+    g_emb_dim = args.g_dim_emb
+    g_hidden_size = args.g_hidden_size
+    g_num_epochs = args.g_epochs
+    g_pretrain_epochs = args.g_pretrain_epochs
+    train_percent = args.train_percent
+    g_num_search = args.g_num_search
+    g_update_rate = args.g_update_rate
+    g_num_expend = args.g_num_expend
 
-
-
-    #########################################################################################
     #  Discriminator  Hyper-parameters
-    #########################################################################################
-    dis_embedding_dim = 64
+    d_num_epochs = args.d_epochs
+    d_pretrain_epochs = args.d_pretrain_epochs
+    d_emb_dim = args.d_dim_emb
+    d_dropout_prob = args.d_dropout_prob
+    d_reg_lambda = args.d_reg_lambda
+
+
     dis_filter_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     dis_num_filters = [100, 200, 200, 200, 200, 100, 100, 100, 100, 100]
-    dis_dropout_keep_prob = 0.75
-    dis_l2_reg_lambda = 0.2
-
-    #########################################################################################
-    #  Basic Training Parameters
-    #########################################################################################
-    TOTAL_BATCH = 200
-    origin_data_file = 'diffusion2.pkl'
-    positive_file = 'save/real_data.txt'
-    negative_file = 'save/generator_sample.txt'
-    test_file = 'save/test_data.txt'
-    eval_file = 'save/eval_file.txt'
-    target_params_file = 'save/target_params.pkl'
-    log_file = 'save/experiment-log.txt'
 
 
+    START_TOKEN = 0
+    SEED = 88
     random.seed(SEED)
     np.random.seed(SEED)
     assert START_TOKEN == 0
 
-    gen_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH)
-    likelihood_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH) # For testing
-    test_data_loader = Gen_Data_loader(BATCH_SIZE, SEQ_LENGTH) # For testing
-    dis_data_loader = Dis_dataloader(BATCH_SIZE, SEQ_LENGTH)
 
-    generator = Generator(vocab_size, BATCH_SIZE, EMB_DIM, HIDDEN_DIM, SEQ_LENGTH, START_TOKEN)
-    discriminator = Discriminator(sequence_length=SEQ_LENGTH, num_classes=2, vocab_size=vocab_size, embedding_size=dis_embedding_dim,
-                                filter_sizes=dis_filter_sizes, num_filters=dis_num_filters, l2_reg_lambda=dis_l2_reg_lambda)
+    input_length = int(seq_length * train_percent)
+    train_batch = int(generated_num / batch_size)
+    test_batch = int(generated_num_test / batch_size)
+
+    # Model
+
+
+    generator = Generator(vocab_size, batch_size, g_emb_dim, g_hidden_size, seq_length, START_TOKEN, input_length, graph_file=graph_file)
+    discriminator = Discriminator(sequence_length=seq_length, num_classes=2, vocab_size=vocab_size, embedding_size=d_emb_dim,
+                                filter_sizes=dis_filter_sizes, num_filters=dis_num_filters, l2_reg_lambda=d_reg_lambda)
 
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     sess = tf.Session(config=config)
     sess.run(tf.global_variables_initializer())
 
-    # First, use the oracle model to provide the positive examples, which are sampled from the oracle data distribution
-    generate_samples(sess, generator, BATCH_SIZE, generated_num, positive_file, True, origin_data_file)
-    gen_data_loader.create_batches(positive_file)
+    utils.prepare_data(origin_data_file)
+    dis_data_loader = Dis_dataloader(batch_size, seq_length)
+    positive_samples = utils.feed_data_all(origin_data_file, generated_num)
 
-    # save test data into test_file
-    generate_samples(sess, generator, BATCH_SIZE, generated_num_test, test_file, True, origin_data_file, True)
-    test_data_loader.create_batches(test_file)
+    graph = nx.read_edgelist(graph_file, nodetype=int, create_using=nx.DiGraph())
+    adjacency_matrix = np.asarray(nx.adjacency_matrix(graph).todense()).transpose()
 
+    # log_file = 'save/' + 'n@' + str(g_num_expend) + '_p@' + str(int(train_percent * 10))+ '.txt'
     log = open(log_file, 'w')
     #  pre-train generator
     print 'Start pre-training...'
-    log.write('pre-training...\n')
-    for epoch in xrange(PRE_EPOCH_NUM):
-        loss = pre_train_epoch(sess, generator, gen_data_loader)
+    log.write('Start pre-training...')
+    for epoch in xrange(g_pretrain_epochs):
+        loss = pre_train_epoch(sess, generator, batch_size, train_batch)
+        print 'pre-train epoch:%d loss:%.3f' % (epoch, loss)
+        log.write('pre-train epoch:%d loss:%.3f\n' % (epoch, loss))
         if epoch % 5 == 0:
-            generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
-            likelihood_data_loader.create_batches(eval_file)
-            test_loss = target_loss(sess, generator, likelihood_data_loader)
-            print 'pre-train epoch ', epoch, 'test_loss ', test_loss
-            buffer = 'epoch:\t'+ str(epoch) + '\tnll:\t' + str(test_loss) + '\n'
-            log.write(buffer)
-            test_accuracy_epoch(sess, generator, test_data_loader)
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix, g_num_expend)
+            print 'pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
+            log.write('pre-train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f\n' % (epoch, test_loss, accuracy, p_n, n_n))
 
     print 'Start pre-training discriminator...'
+    log.write('Start pre-training discriminator...\n')
     # Train 3 epoch on the generated data and do this for 50 times
-    for _ in range(50):
-        generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
-        dis_data_loader.load_train_data(positive_file, negative_file)
-        for _ in range(3):
-            dis_data_loader.reset_pointer()
-            for it in xrange(dis_data_loader.num_batch):
-                x_batch, y_batch = dis_data_loader.next_batch()
-                feed = {
-                    discriminator.input_x: x_batch,
-                    discriminator.input_y: y_batch,
-                    discriminator.dropout_keep_prob: dis_dropout_keep_prob
-                }
-                _ = sess.run(discriminator.train_op, feed)
+    train_discrimintor(sess, generator, discriminator, d_pretrain_epochs, batch_size, train_batch, positive_samples,
+                           dis_data_loader, d_dropout_prob)
 
-    rollout = ROLLOUT(generator, 0.8)
+    rollout = ROLLOUT(generator, g_update_rate)
 
     print '#########################################################################'
     print 'Start Adversarial Training...'
-    log.write('adversarial training...\n')
-    for total_batch in range(TOTAL_BATCH):
+    log.write('Start Adversarial Training...\n')
+    for epoch in range(num_epochs):
         # Train the generator for one step
-        for it in range(1):
-            samples = generator.generate(sess)
-            rewards = rollout.get_reward(sess, samples, 16, discriminator)
-            feed = {generator.x: samples, generator.rewards: rewards}
-            _ = sess.run(generator.g_updates, feed_dict=feed)
-
+        for it in range(g_num_epochs):
+            no = np.random.randint(0, train_batch)
+            samples, _ = generator.generate_step(sess, positive_samples[no * batch_size :(no +1) * batch_size])
+            rewards = rollout.get_reward(sess, samples, g_num_search, discriminator)
+            generator.update_step(sess, samples, rewards)
         # Test
-        if total_batch % 5 == 0 or total_batch == TOTAL_BATCH - 1:
-            generate_samples(sess, generator, BATCH_SIZE, generated_num, eval_file)
-            likelihood_data_loader.create_batches(eval_file)
-            test_loss = target_loss(sess, generator, likelihood_data_loader)
-            buffer = 'epoch:\t' + str(total_batch) + '\tnll:\t' + str(test_loss) + '\n'
-            print 'total_batch: ', total_batch, 'test_loss: ', test_loss
-            log.write(buffer)
-            test_accuracy_epoch(sess, generator, test_data_loader)
+        if epoch % 5 == 0 or epoch == num_epochs - 1:
+            accuracy, test_loss, p_n, n_n = test_accuracy_epoch(sess, generator, batch_size, test_batch, input_length, adjacency_matrix, g_num_expend)
+            print 'train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f' % (epoch, test_loss, accuracy, p_n, n_n)
+            log.write('train epoch:%d loss:%.5f jaccard:%.5f p@n:%.5f, n@n:%.5f\n' % (epoch, test_loss, accuracy, p_n, n_n))
 
         # Update roll-out parameters
         rollout.update_params()
 
         # Train the discriminator
-        for _ in range(5):
-            generate_samples(sess, generator, BATCH_SIZE, generated_num, negative_file)
-            dis_data_loader.load_train_data(positive_file, negative_file)
-
-            for _ in range(3):
-                dis_data_loader.reset_pointer()
-                for it in xrange(dis_data_loader.num_batch):
-                    x_batch, y_batch = dis_data_loader.next_batch()
-                    feed = {
-                        discriminator.input_x: x_batch,
-                        discriminator.input_y: y_batch,
-                        discriminator.dropout_keep_prob: dis_dropout_keep_prob
-                    }
-                    _ = sess.run(discriminator.train_op, feed)
-
-    log.close()
+        train_discrimintor(sess, generator, discriminator, d_num_epochs, batch_size, train_batch, positive_samples,
+                           dis_data_loader, d_dropout_prob)
 
 
 if __name__ == '__main__':
